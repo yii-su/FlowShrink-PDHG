@@ -40,28 +40,28 @@ $$
 
 1.  **容量约束 (Capacity Constraints):**
     对于任意一条边，流经该边的所有商品的总流量不能超过该边的容量。
-    $$
-    \sum_{k \in K} x_{ij}^k \le u_{ij} \quad \forall (i, j) \in E
-    $$
+$$
+\sum_{k \in K} x_{ij}^k \le u_{ij} \quad \forall (i, j) \in E
+$$
 
 2.  **流量守恒约束 (Flow Conservation Constraints):**
     对于每一种商品和每一个节点，净流量必须等于该节点的供给/需求。
-    $$
-    \sum_{i: (i, j) \in E} x_{ij}^k - \sum_{l: (j, l) \in E} x_{jl}^k =
-    \begin{cases}
-    -d_k & \text{if } j = s_k \\
-    d_k & \text{if } j = t_k \\
-    0 & \text{otherwise}
-    \end{cases}
-    \quad \forall j \in V, \forall k \in K
-    $$
+$$
+\sum_{i: (i, j) \in E} x_{ij}^k - \sum_{l: (j, l) \in E} x_{jl}^k =
+\begin{cases}
+-d_k & \text{if } j = s_k \\
+d_k & \text{if } j = t_k \\
+0 & \text{otherwise}
+\end{cases}
+\quad \forall j \in V, \forall k \in K
+$$
     *   该公式表示：对于商品 $k$ 和节点 $j$，总流入量减去总流出量，必须等于节点 $j$ 对商品 $k$ 的“产出量”。源点 $s_k$ 产出 $d_k$（净流出为 $d_k$），汇点 $t_k$ 消耗 $d_k$（净流入为 $d_k$），中间节点不产出也不消耗（流入等于流出）。
 
 3.  **非负约束 (Non-negativity Constraints):**
     流量不能为负。
-    $$
-    x_{ij}^k \ge 0 \quad \forall (i, j) \in E, \forall k \in K
-    $$
+$$
+x_{ij}^k \ge 0 \quad \forall (i, j) \in E, \forall k \in K
+$$
 
 
 ---
