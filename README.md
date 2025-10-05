@@ -40,12 +40,14 @@ $$
 
 1.  **容量约束 (Capacity Constraints):**
     对于任意一条边，流经该边的所有商品的总流量不能超过该边的容量。
+
 $$
 \sum_{k \in K} x_{ij}^k \le u_{ij} \quad \forall (i, j) \in E
 $$
 
 2.  **流量守恒约束 (Flow Conservation Constraints):**
     对于每一种商品和每一个节点，净流量必须等于该节点的供给/需求。
+
 $$
 \sum_{i: (i, j) \in E} x_{ij}^k - \sum_{l: (j, l) \in E} x_{jl}^k =
 \begin{cases}
@@ -59,6 +61,7 @@ $$
 
 3.  **非负约束 (Non-negativity Constraints):**
     流量不能为负。
+    
 $$
 x_{ij}^k \ge 0 \quad \forall (i, j) \in E, \forall k \in K
 $$
