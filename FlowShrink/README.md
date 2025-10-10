@@ -23,8 +23,7 @@
 
 $$
 \min_{x_{ke}\ge 0,\; X_k\ge 0}\;
-\sum_{k=1}^K w_k (X_k - d_k)^2
-+ \sum_{e\in E} p_e \Big(\sum_{k=1}^K x_{ke}\Big)
+\sum_{k=1}^K w_k (X_k - d_k)^2 + \sum_{e\in E} p_e \Big(\sum_{k=1}^K x_{ke}\Big)
 $$
 
 - 约束
@@ -89,24 +88,24 @@ f_1 & 0   & \cdots & 0\\
 \end{bmatrix} \in \mathbb{R}^{(KN)\times K}
 $$
     
-    使得 $S X = [X_1 f_1;\; \dots;\; X_K f_K] \in \mathbb{R}^{KN}$。
+使得 $S X = [X_1 f_1;\; \dots;\; X_K f_K] \in \mathbb{R}^{KN}$。
 
 - 线性算子（用于约束）
-  - 流量守恒的左侧算子（块对角）：
+- 流量守恒的左侧算子（块对角）：
 
-    $$
-    \mathcal{A} := I_K \otimes A \in \mathbb{R}^{(KN)\times (KM)}
-    $$
-    
-    满足 $\mathcal{A} x = [A x_1;\; \dots;\; A x_K]$。
-    
-  - 容量聚合算子（对商品求和到边）：
+$$
+\mathcal{A} := I_K \otimes A \in \mathbb{R}^{(KN)\times (KM)}
+$$
 
-    $$
-    \mathcal{C} := \mathbf{1}_K^\top \otimes I_M \in \mathbb{R}^{M\times (KM)}
-    $$
-    
-    满足 $\mathcal{C} x = \sum_{k=1}^K x_k \in \mathbb{R}^M$。
+满足 $\mathcal{A} x = [A x_1;\; \dots;\; A x_K]$。
+
+- 容量聚合算子（对商品求和到边）：
+
+$$
+\mathcal{C} := \mathbf{1}_K^\top \otimes I_M \in \mathbb{R}^{M\times (KM)}
+$$
+
+满足 $\mathcal{C} x = \sum_{k=1}^K x_k \in \mathbb{R}^M$。
 
 - 成本向量
   - 边成本堆叠到 $KM$ 维：
