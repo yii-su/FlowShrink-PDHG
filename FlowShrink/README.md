@@ -110,9 +110,9 @@ $$
 - 成本向量
   - 边成本堆叠到 $KM$ 维：
 
-    $$
-    \tilde p := \mathbf{1}_K \otimes p \in \mathbb{R}^{KM}
-    $$
+$$
+\tilde p := \mathbf{1}_K \otimes p \in \mathbb{R}^{KM}
+$$
     
     其中 $p\in \mathbb{R}^M$（可取常量向量 $p=\bar p\, \mathbf{1}_M$）。
 
