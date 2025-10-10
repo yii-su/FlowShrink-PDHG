@@ -122,16 +122,15 @@ $$
 
 - 矩阵优化模型（凸二次规划）
 
-
-  $$
-  \begin{aligned}
-  \min_{x\ge 0,\; X\ge 0}\quad &
-  (X - d)^\top W (X - d) \;+\; \tilde p^\top x\\
-  \text{s.t.}\quad &
-  \mathcal{A} x - S X = 0 \quad (\text{每商品的流量守恒})\\
-  & \mathcal{C} x \le c \quad (\text{边容量约束})
-  \end{aligned}
-  $$
+$$
+\begin{aligned}
+\min_{x\ge 0,\; X\ge 0}\quad &
+(X - d)^\top W (X - d) \;+\; \tilde p^\top x\\
+\text{s.t.}\quad &
+\mathcal{A} x - S X = 0 \quad (\text{每商品的流量守恒})\\
+& \mathcal{C} x \le c \quad (\text{边容量约束})
+\end{aligned}
+$$
 
 - 说明
   - 若采用等价的最大化效用形式，可写为最大化 $-\,(X-d)^\top W (X-d) - \tilde p^\top x$，约束不变。
@@ -150,31 +149,33 @@ $$
 
 - 线性算子与“观测”堆叠
 
-  $$
-  \begin{aligned}
-  y_1 &= \mathcal{C} x \in \mathbb{R}^M\\
-  y_2 &= \mathcal{A} x - S X \in \mathbb{R}^{KN}
-  \end{aligned}
-  $$
+$$
+\begin{aligned}
+y_1 &= \mathcal{C} x \in \mathbb{R}^M\\
+y_2 &= \mathcal{A} x - S X \in \mathbb{R}^{KN}
+\end{aligned}
+$$
   
   
   堆叠为 $y := \begin{bmatrix}y_1\\ y_2\end{bmatrix}$，并定义整体算子
   
-  $$
-  K := \begin{bmatrix}
-  \mathcal{C} & 0\\
-  \mathcal{A} & -S
-  \end{bmatrix},\quad
-  K z = \begin{bmatrix}
-  \mathcal{C} x\\
-  \mathcal{A} x - S X
-  \end{bmatrix}
-  $$
+$$
+K := \begin{bmatrix}
+\mathcal{C} & 0\\
+\mathcal{A} & -S
+\end{bmatrix},\quad
+K z = \begin{bmatrix}
+\mathcal{C} x\\
+\mathcal{A} x - S X
+\end{bmatrix}
+$$
 
 - 于是 PDHG 标准形式为
-  $$
-  \min_{z} \; f(z) + g(K z)
-  $$
+
+$$
+\min_{z} \; f(z) + g(K z)
+$$
+
   其中
   - $I_{\{0\}}(y_2)$ 是等式约束的指示函数（投影即强制为零）。
   - $I_{\{y_1 \le c\}}(y_1)$ 是容量不等式的指示函数（投影到盒集 $\{y_1\mid y_1\le c\}$）。
@@ -282,92 +283,90 @@ $0.5(x_{10}+x_{20}) + 0.5(x_{11}+x_{21}) + 0.5(x_{12}+x_{22}) + 0.5(x_{13}+x_{23
 
 *   **变量向量**:
 
-    $$
-    x = [x_{10}, x_{11}, x_{12}, x_{13}, x_{14}, x_{20}, x_{21}, x_{22}, x_{23}, x_{24}]^\top \in \mathbb{R}^{10} \\
-    X = [X_1, X_2]^\top \in \mathbb{R}^{2}
-    $$
+$$
+x = [x_{10}, x_{11}, x_{12}, x_{13}, x_{14}, x_{20}, x_{21}, x_{22}, x_{23}, x_{24}]^\top \in \mathbb{R}^{10} \\
+X = [X_1, X_2]^\top \in \mathbb{R}^{2}
+$$
+
 *   **目标/容量/成本/权重**:
 
 
-    $$
-    d = [15, 6]^\top \\
-    c = [10, 8, 12, 7, 5]^\top \\
-    p = [0.5, 0.5, 0.5, 0.5, 0.5]^\top, \quad \tilde{p} = [p^\top, p^\top]^\top \in \mathbb{R}^{10} \\
-    W = \begin{bmatrix} 10 & 0 \\ 0 & 1 \end{bmatrix}
-    $$
+$$
+d = [15, 6]^\top \\
+c = [10, 8, 12, 7, 5]^\top \\
+p = [0.5, 0.5, 0.5, 0.5, 0.5]^\top, \quad \tilde{p} = [p^\top, p^\top]^\top \in \mathbb{R}^{10} \\
+W = \begin{bmatrix} 10 & 0 \\ 0 & 1 \end{bmatrix}
+$$
 
 **2. 核心算子矩阵**
 
 *   **节点-边关联矩阵 $A \in \mathbb{R}^{4 \times 5}$**: 描述网络拓扑。
     行代表节点 (0,1,2,3)，列代表边 (e0,e1,e2,e3,e4)。
     
-    $$
-    \begin{array}{c|ccccc}
-     & e_0 & e_1 & e_2 & e_3 & e_4 \\
-    \hline
-    v_0 & -1 & -1 &  0 &  0 &  0 \\
-    v_1 & +1 &  0 & -1 &  0 & +1 \\
-    v_2 &  0 & +1 &  0 & -1 & -1 \\
-    v_3 &  0 &  0 & +1 & +1 &  0
-    \end{array}
-    \quad\implies\quad
-    A = \begin{bmatrix}
-    -1 & -1 &  0 &  0 &  0 \\
-    +1 &  0 & -1 &  0 & +1 \\
-     0 & +1 &  0 & -1 & -1 \\
-     0 &  0 & +1 & +1 &  0
-    \end{bmatrix}
-    $$
+$$
+\begin{array}{c|ccccc}
+    & e_0 & e_1 & e_2 & e_3 & e_4 \\
+\hline
+v_0 & -1 & -1 &  0 &  0 &  0 \\
+v_1 & +1 &  0 & -1 &  0 & +1 \\
+v_2 &  0 & +1 &  0 & -1 & -1 \\
+v_3 &  0 &  0 & +1 & +1 &  0
+\end{array}
+\quad\implies\quad
+A = \begin{bmatrix}
+-1 & -1 &  0 &  0 &  0 \\
++1 &  0 & -1 &  0 & +1 \\
+    0 & +1 &  0 & -1 & -1 \\
+    0 &  0 & +1 & +1 &  0
+\end{bmatrix}
+$$
+
 *   **流量守恒算子 $\mathcal{A} = I_2 \otimes A \in \mathbb{R}^{8 \times 10}$**:
 
-
-    $$
-    \mathcal{A} = \begin{bmatrix} A & 0 \\ 0 & A \end{bmatrix} =
-    \begin{bmatrix}
-    -1 & -1 & 0 & 0 & 0 &  &  &  &  & \\
-     1 &  0 &-1 & 0 & 1 &  &  &  &  & \\
-     0 &  1 & 0 &-1 &-1 &  & \text{zeros} &  &  & \\
-     0 &  0 & 1 & 1 & 0 &  &  &  &  & \\
-     &  &  &  &  & -1 & -1 & 0 & 0 & 0 \\
-     & \text{zeros} & & & &  1 &  0 &-1 & 0 & 1 \\
-     &  &  &  &  &  0 &  1 & 0 &-1 &-1 \\
-     &  &  &  &  &  0 &  0 & 1 & 1 & 0
-    \end{bmatrix}
-    $$
+$$
+\mathcal{A} = \begin{bmatrix} A & 0 \\ 0 & A \end{bmatrix} =
+\begin{bmatrix}
+-1 & -1 & 0 & 0 & 0 &  &  &  &  & \\
+1 &  0 &-1 & 0 & 1 &  &  &  &  & \\
+0 &  1 & 0 &-1 &-1 &  & \text{zeros} &  &  & \\
+0 &  0 & 1 & 1 & 0 &  &  &  &  & \\
+&  &  &  &  & -1 & -1 & 0 & 0 & 0 \\
+& \text{zeros} & & & &  1 &  0 &-1 & 0 & 1 \\
+&  &  &  &  &  0 &  1 & 0 &-1 &-1 \\
+&  &  &  &  &  0 &  0 & 1 & 1 & 0
+\end{bmatrix}
+$$
     
 *   **供求模式向量 $f_k \in \mathbb{R}^4$ 和 算子 $S \in \mathbb{R}^{8 \times 2}$**:
     *   $f_1$ ($0 \to 3$): $f_1 = [-1, 0, 0, 1]^\top$
     *   $f_2$ ($0 \to 1$): $f_2 = [-1, 1, 0, 0]^\top$
 
+$$
+S = \begin{bmatrix} f_1 & 0 \\ 0 & f_2 \end{bmatrix} =
+\begin{bmatrix}
+-1 &  0 \\
+    0 &  0 \\
+    0 &  0 \\
+    1 &  0 \\
+    0 & -1 \\
+    0 &  1 \\
+    0 &  0 \\
+    0 &  0
+\end{bmatrix}
+$$
     
-    $$
-    S = \begin{bmatrix} f_1 & 0 \\ 0 & f_2 \end{bmatrix} =
-    \begin{bmatrix}
-    -1 &  0 \\
-     0 &  0 \\
-     0 &  0 \\
-     1 &  0 \\
-     0 & -1 \\
-     0 &  1 \\
-     0 &  0 \\
-     0 &  0
-    \end{bmatrix}
-    $$
-    
-
 *   **容量聚合算子 $\mathcal{C} = \mathbf{1}_2^\top \otimes I_5 = [I_5 | I_5] \in \mathbb{R}^{5 \times 10}$**:
 
-
-    $$
-    \mathcal{C} =
-    \begin{bmatrix}
-    1 & 0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 \\
-    0 & 1 & 0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 \\
-    0 & 0 & 1 & 0 & 0 & 0 & 0 & 1 & 0 & 0 \\
-    0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 1 & 0 \\
-    0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 1
-    \end{bmatrix}
-    $$
+$$
+\mathcal{C} =
+\begin{bmatrix}
+1 & 0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 \\
+0 & 1 & 0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 \\
+0 & 0 & 1 & 0 & 0 & 0 & 0 & 1 & 0 & 0 \\
+0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 1 & 0 \\
+0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 1
+\end{bmatrix}
+$$
 
 **3. 最终的矩阵优化问题**
 
