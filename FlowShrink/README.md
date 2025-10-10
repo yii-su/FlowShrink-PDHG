@@ -114,7 +114,7 @@ $$
 \tilde p := \mathbf{1}_K \otimes p \in \mathbb{R}^{KM}
 $$
     
-    其中 $p\in \mathbb{R}^M$（可取常量向量 $p=\bar p\, \mathbf{1}_M$）。
+其中 $p\in \mathbb{R}^M$（可取常量向量 $p=\bar p\, \mathbf{1}_M$）。
 
 - 权重矩阵
   - $W := \mathrm{diag}(w_1,\dots,w_K) \in \mathbb{R}^{K\times K}$。
