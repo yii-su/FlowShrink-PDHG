@@ -1,33 +1,56 @@
-import numpy as np
+# import numpy as np
+import torch
 
-from utils import create_data, incidence_to_adjacency, incidence_to_weighted_adjacency
+from utils import create_base_network, \
+    ensure_weak_connectivity, \
+    adjacency_to_incidence, \
+    create_commodities
+# from core import apsp_gpu
+from core import apsp_gpu_adaptive
 
-if __name__ == "__main__":
-    # 假设 create_data 函数已经定义
+N = 10000
+k = 10
+seed = 1
+W = create_base_network(N, k, seed)
+W = ensure_weak_connectivity(W, seed)
 
-    # 1. 生成网络数据
-    N_nodes = 5
-    k_neighbors = 2
-    A_matrix, c_costs = create_data(N_nodes, k_neighbors)
-    print(f"生成的关联矩阵 A 的形状: {A_matrix.shape}")
-    print("关联矩阵 A (部分):")
-    print(A_matrix[:, :10])  # 只打印前10条边
-    print("对应的边成本 c (部分):", c_costs[:10])
-    print("-" * 30)
+# A, c = adjacency_to_incidence(W)
 
-    # 2. (可选) 生成二元邻接矩阵
-    adj_binary = incidence_to_adjacency(A_matrix)
-    print("生成的二元邻接矩阵 (部分):")
-    print(adj_binary[:5, :5])
-    print("-" * 30)
+# K = 3
+# commodities = create_commodities(W, K, 10.0, seed)
 
-    # 3. (推荐) 生成带权重的邻接矩阵，为最短路计算做准备
-    # 这个 adj_weighted 就是你进行最短路计算所需要的输入
-    adj_weighted = incidence_to_weighted_adjacency(A_matrix, c_costs)
-    print(f"生成的带权重邻接矩阵，形状: {adj_weighted.shape}")
-    print("矩阵中非无穷大的元素数量:", np.sum(adj_weighted != np.inf) - N_nodes)
-    print("矩阵中无穷大的元素数量:", np.sum(adj_weighted == np.inf))
-    print("带权重邻接矩阵 (部分，inf表示无穷大):")
-    print(np.round(adj_weighted[:5, :5], 2))
+# 转换为 PyTorch Tensor
+W_tensor = torch.from_numpy(W.T).float()
 
-    # 你现在可以直接将 adj_weighted 传递给 scipy.sparse.csgraph.dijkstra 或 floyd_warshall
+print("="*60)
+print("开始 GPU APSP 计算")
+print("="*60)
+
+# # 执行 GPU APSP（装饰器会自动打印性能信息）
+# D, P, iterations = apsp_gpu(
+#     W_tensor, 
+#     device='cuda:0',
+#     convergence_check=True
+# )
+
+# # 打印最终结果
+# print("\n--- 最终最短距离矩阵 D ---")
+# print(D.cpu().numpy())
+
+# print("\n--- 最终前驱节点矩阵 P ---")
+# print(P.cpu().numpy())
+
+D_sparse, P_sparse, iter_sparse = apsp_gpu_adaptive(
+    W_tensor, 
+    device='cuda:0',
+    sparsity_threshold=0.3,
+    convergence_check=True
+)
+
+
+# 打印最终结果
+print("\n--- 最终最短距离矩阵 D ---")
+print(D_sparse.cpu().numpy())
+
+print("\n--- 最终前驱节点矩阵 P ---")
+print(P_sparse.cpu().numpy())

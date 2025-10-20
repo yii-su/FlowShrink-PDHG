@@ -1,155 +1,212 @@
-import numpy as np 
-# import cvxpy as cp 
-# import torch
-# import time
-# from torch_scatter import scatter, scatter_add
-# import argparse
+from collections import deque
 
+import numpy as np
+from scipy.sparse.csgraph import connected_components
+from scipy.sparse import csr_matrix
 
-def create_data(N, k):
+def create_base_network(N, k, seed=None):
     """
-    创建网络数据，生成节点和连接关系
+    创建基于k-近邻的有向图初始网络。
     
     参数:
-        N: 节点数量
-        k: 每个节点的邻居数量
+        N (int): 节点数量
+        k (int): 每个节点的出度（向外连接的邻居数量）
+        seed (int, optional): 随机数种子
     
     返回:
-        A: 关联矩阵 (N×edges)，表示节点与边的连接关系
-        c: 边的成本向量
+        adj_matrix (np.ndarray): N×N 有向带权邻接矩阵
+        node_list (np.ndarray): N×2 节点坐标
     """
+    rng = np.random.default_rng(seed)
     
-    # 生成N个随机节点的2D坐标
-    node_list = np.array([np.random.rand(N),
-                          np.random.rand(N)]).reshape((N,2))
+    # 生成节点坐标
+    node_list = rng.random((N, 2))
     
-    link_list = []
-    
-    # 为每个节点找到k个最近邻居并创建连接
-    for i in range(N):
-        # 计算节点i到所有其他节点的欧几里得距离
-        distance = np.array([np.linalg.norm(node_list[i]-
-                                            node_list[j]) for j in range(N)])
-        
-        # 找到距离最近的k个邻居节点（排除自己）
-        neighbors = np.argsort(distance)[1:(k+1)]
-        
-        # 创建从节点i出发的边表示：i为起点(-1)，邻居为终点(+1)
-        link = np.zeros((N,k))
-        link[i,:] = -1  # 起点标记为-1
-        link[neighbors,np.array(range(k))] = 1  # 终点标记为+1
-        
-        # 创建到节点i的边表示：i为终点(+1)，邻居为起点(-1)  
-        link2 = np.zeros((N,k))
-        link2[i,:] = 1  # 终点标记为+1
-        link2[neighbors,np.array(range(k))] = -1  # 起点标记为-1
-        
-        link_list.append(link)
-        link_list.append(link2)
-    
-    # 合并所有边并去除重复的边
-    A = np.hstack(link_list)
-    A = np.unique(A, axis=1)  # 去重，避免重复边
-    
-    # 随机打乱边的顺序
-    p = np.random.permutation(A.shape[1])
-    
-    # 生成随机边成本，服从对数均匀分布 [0.5, 5]
-    c = np.exp(np.random.rand(A.shape[1])*(np.log(5)-np.log(0.5))+np.log(0.5))
-    
-    return A[:,p], c
-
-
-def incidence_to_adjacency(A):
-    """
-    高效地将图的关联矩阵转换为邻接矩阵。
-    此函数利用NumPy的向量化操作，避免了显式循环，因此性能很高。
-    
-    参数:
-        A (np.ndarray): 关联矩阵，形状为 (N, M)，其中 N 是节点数，M 是边数。
-                        每一列代表一条边，-1 表示起点，+1 表示终点。
-    
-    返回:
-        np.ndarray: 二元邻接矩阵，形状为 (N, N)。
-                    如果存在从节点 i 到节点 j 的边，则 adj[i, j] = 1，否则为 0。
-    """
-    # 节点数量
-    N = A.shape[0]
-    
-    # 对于A的每一列（每一条边），找到-1所在的行索引，这就是边的起点
-    # np.argmin(A, axis=0) 会返回一个长度为 M 的数组，包含每条边的起点节点索引
-    source_nodes = np.argmin(A, axis=0)
-    
-    # 同理，找到+1所在的行索引，这就是边的终点
-    # np.argmax(A, axis=0) 会返回一个长度为 M 的数组，包含每条边的终点节点索引
-    dest_nodes = np.argmax(A, axis=0)
-    
-    # 初始化一个 N x N 的零矩阵
-    adj_matrix = np.zeros((N, N), dtype=np.int8)
-    
-    # 使用NumPy的高级索引，一次性将所有边的连接关系设置为1
-    # source_nodes 作为行索引，dest_nodes 作为列索引
-    adj_matrix[source_nodes, dest_nodes] = 1
-    
-    return adj_matrix
-
-
-def incidence_to_weighted_adjacency(A, costs):
-    """
-    高效地将关联矩阵和成本向量转换为带权重的邻接矩阵。
-    
-    这对于运行最短路算法（如Dijkstra或Floyd-Warshall）是必需的。
-
-    参数:
-        A (np.ndarray): 关联矩阵，形状为 (N, M)。
-        costs (np.ndarray): 边的成本（权重）向量，长度为 M。
-    
-    返回:
-        np.ndarray: 带权重的邻接矩阵，形状为 (N, N)。
-                    adj[i, j] 的值是从节点 i 到 j 的边的成本。
-                    如果不存在直接的边，则值为无穷大 (inf)。
-                    对角线 (i, i) 的值为 0。
-    """
-    N = A.shape[0]
-    
-    # 输入检查
-    if A.shape[1] != len(costs):
-        raise ValueError("关联矩阵的列数必须与成本向量的长度相等。")
-
-    # 找到所有边的起点和终点
-    source_nodes = np.argmin(A, axis=0)
-    dest_nodes = np.argmax(A, axis=0)
-    
-    # 初始化一个 N x N 的矩阵，所有值都设为无穷大
-    adj_matrix = np.full((N, N), np.inf)
-    
-    # 使用高级索引，将每条边的成本填充到邻接矩阵的对应位置
-    adj_matrix[source_nodes, dest_nodes] = costs
-    
-    # 在最短路算法中，从一个节点到其自身的成本通常为0
+    # 初始化邻接矩阵
+    # adj_matrix = np.full((N, N), np.inf)
+    adj_matrix = np.full((N, N), 0.)
     np.fill_diagonal(adj_matrix, 0)
     
+    # 为每个节点添加k条出边
+    for i in range(N):
+        # 计算到所有其他节点的距离
+        distance = np.linalg.norm(node_list[i] - node_list, axis=1)
+        
+        # 找到k个最近邻居（排除自己）
+        neighbors = np.argsort(distance)[1:(k+1)]
+        
+        # 为每条边生成对数均匀分布的权重 [0.5, 5]
+        costs = np.exp(rng.random(k) * (np.log(5) - np.log(0.5)) + np.log(0.5))
+        
+        # 添加有向边：从i到neighbors
+        adj_matrix[i, neighbors] = costs
+    
     return adj_matrix
 
 
-def create_commodities(N, K_commodities, max_demand=10.0):
+def ensure_weak_connectivity(adj_matrix, seed=None):
     """
-    生成随机的商品数据。
+    检查有向图的弱连通性，如果不满足则增边使其弱连通。
+    
+    参数:
+        adj_matrix (np.ndarray): N×N 有向带权邻接矩阵
+        node_list (np.ndarray): N×2 节点坐标
+        seed (int, optional): 随机数种子，仅在需要增边时使用
+    
+    返回:
+        connected_adj_matrix (np.ndarray): 弱连通的 N×N 有向带权邻接矩阵
+    """
+    N = adj_matrix.shape[0]
+    
+    # 创建无向版本检查弱连通性
+    # 如果 adj[i,j] 或 adj[j,i] 有边，则无向图中 i-j 有边
+    undirected = np.isfinite(adj_matrix) | np.isfinite(adj_matrix.T)
+    undirected = undirected & (undirected != np.eye(N, dtype=bool))
+    
+    # 检查连通分量
+    n_components, labels = connected_components(
+        csgraph=csr_matrix(undirected), 
+        directed=False, 
+        return_labels=True
+    )
+    
+    # 如果已经弱连通，直接返回
+    if n_components == 1:
+        return adj_matrix.copy()
+    
+    # 需要增边，创建随机数生成器
+    rng = np.random.default_rng(seed)
+    
+    # 复制邻接矩阵以避免修改原始数据
+    result_adj = adj_matrix.copy()
+    
+    # 连接相邻编号的连通分量
+    for comp_id in range(n_components - 1):
+        # 找到属于当前分量和下一个分量的节点
+        nodes_comp_i = np.where(labels == comp_id)[0]
+        nodes_comp_next = np.where(labels == comp_id + 1)[0]
+        
+        # 随机选择两个节点
+        u = rng.choice(nodes_comp_i)
+        v = rng.choice(nodes_comp_next)
+        
+        # 生成随机权重（对数均匀分布 [0.5, 5]）
+        cost = np.exp(rng.random() * (np.log(5) - np.log(0.5)) + np.log(0.5))
+        
+        # 添加双向边
+        result_adj[u, v] = cost
+        result_adj[v, u] = cost
+    
+    return result_adj
+
+
+def adjacency_to_incidence(adj_matrix):
+    """
+    将有向邻接矩阵转换为关联矩阵和成本向量。
+    
+    参数:
+        adj_matrix (np.ndarray): N×N 有向带权邻接矩阵（已确保弱连通）
+    
+    返回:
+        A (np.ndarray): 关联矩阵 (N, M)，M为边数
+        c (np.ndarray): 边的成本向量，长度M
+    """
+    N = adj_matrix.shape[0]
+    
+    # 找到所有有向边
+    sources, destinations = np.where((adj_matrix < np.inf) & (adj_matrix > 0))
+    
+    # 边的数量
+    M = len(sources)
+    
+    # 初始化关联矩阵和成本向量
+    A = np.zeros((N, M))
+    c = np.zeros(M)
+    
+    # 构建关联矩阵
+    for idx, (u, v) in enumerate(zip(sources, destinations)):
+        A[u, idx] = -1  # 起点
+        A[v, idx] = 1   # 终点
+        c[idx] = adj_matrix[u, v]
+    
+    return A, c
+
+
+def create_commodities(adj_matrix, K_commodities, max_demand=10.0, seed=None):
+    """
+    生成随机的商品数据，确保每个(s,t)对之间存在有向路径。
 
     参数:
-        N (int): 网络中的节点总数。
-        K_commodities (int): 要生成的商品数量。
-        max_demand (float): 单个商品的最大需求量。
+        adj_matrix (np.ndarray): N×N 有向带权邻接矩阵
+        K_commodities (int): 要生成的商品数量
+        max_demand (float): 单个商品的最大需求量
+        seed (int, optional): 随机数种子
 
     返回:
-        list: 一个商品列表，每个元素是一个元组 (s_k, t_k, d_k)，
-              分别代表源节点、汇节点和需求量。
+        list: 商品列表，每个元素是元组 (s_k, t_k, d_k)
     """
+    rng = np.random.default_rng(seed)
+    N = adj_matrix.shape[0]
+    
+    if K_commodities > N:
+        raise ValueError(f"商品数量 {K_commodities} 不能超过节点数量 {N}")
+    
+    # 1. 随机选择K个不重复的源节点
+    sources = rng.choice(N, K_commodities, replace=False)
+    
     commodities = []
-    for _ in range(K_commodities):
-        # 随机选择两个不相同的节点作为源和汇
-        s_k, t_k = np.random.choice(N, 2, replace=False)
-        # 随机生成需求量
-        d_k = np.random.uniform(1.0, max_demand)
-        commodities.append((s_k, t_k, d_k))
+    
+    for s in sources:
+        # 2. 使用BFS找到从s可达的所有节点
+        reachable = bfs_reachable(adj_matrix, s)
+        
+        # 排除源节点本身
+        reachable = [node for node in reachable if node != s]
+        
+        if len(reachable) == 0:
+            # 如果没有可达节点，跳过此商品
+            print(f"警告: 节点 {s} 没有可达的其他节点，跳过此商品")
+            continue
+        
+        # 3. 从可达节点中随机选择一个作为汇节点
+        t = rng.choice(reachable)
+        
+        # 生成随机需求量
+        d = rng.uniform(1.0, max_demand)
+        
+        commodities.append((int(s), int(t), d))
+    
     return commodities
+
+
+def bfs_reachable(adj_matrix, source):
+    """
+    使用BFS找到从源节点可达的所有节点。
+    
+    参数:
+        adj_matrix (np.ndarray): N×N 有向带权邻接矩阵
+        source (int): 源节点索引
+    
+    返回:
+        list: 从源节点可达的所有节点列表（包括源节点自己）
+    """
+    N = adj_matrix.shape[0]
+    visited = np.zeros(N, dtype=bool)
+    queue = deque([source])
+    visited[source] = True
+    reachable = [source]
+    
+    while queue:
+        current = queue.popleft()
+        
+        # 找到当前节点的所有邻居（出边）
+        # 条件：边权重有限且大于0
+        neighbors = np.where((adj_matrix[current] < np.inf) & (adj_matrix[current] > 0))[0]
+        
+        for neighbor in neighbors:
+            if not visited[neighbor]:
+                visited[neighbor] = True
+                queue.append(neighbor)
+                reachable.append(int(neighbor))
+    
+    return reachable
