@@ -210,3 +210,63 @@ def bfs_reachable(adj_matrix, source):
                 reachable.append(int(neighbor))
     
     return reachable
+
+def generate_capacity_constraints(A, commodities, 
+                                  capacity_factor_min=1.0, 
+                                  capacity_factor_max=3.0,
+                                  strategy='uniform'):
+    """
+    为MCNF问题生成边容量约束
+    
+    参数:
+        A (np.ndarray): 关联矩阵 (N, M)
+        commodities (list): 商品列表 [(s_k, t_k, d_k), ...]
+        capacity_factor_min (float): 容量下界系数
+        capacity_factor_max (float): 容量上界系数
+        strategy (str): 容量生成策略
+            - 'uniform': 基于平均需求的均匀分布
+            - 'scaled_uniform': 基于最大需求的均匀分布
+            - 'demand_proportional': 与总需求成比例
+    
+    返回:
+        np.ndarray: 边容量向量，长度M
+    """
+    N, M = A.shape
+    K = len(commodities)
+    
+    # 提取所有商品的需求量
+    demands = np.array([d for _, _, d in commodities])
+    
+    # 计算需求的统计量
+    total_demand = demands.sum()
+    avg_demand = demands.mean()
+    max_demand = demands.max()
+    
+    if strategy == 'uniform':
+        # 策略1: 每条边的容量在 [avg_demand * factor_min, avg_demand * factor_max] 范围内均匀分布
+        # 理念：每条边应能容纳"若干个"平均商品需求
+        capacity_min = capacity_factor_min * avg_demand
+        capacity_max = capacity_factor_max * avg_demand
+        capacity = np.random.uniform(capacity_min, capacity_max, size=M)
+        
+    elif strategy == 'scaled_uniform':
+        # 策略2: 基于最大需求的均匀分布
+        # 理念：确保即使最大的单个商品也能通过（但不是所有边都能轻松通过）
+        capacity_min = capacity_factor_min * max_demand
+        capacity_max = capacity_factor_max * max_demand
+        capacity = np.random.uniform(capacity_min, capacity_max, size=M)
+        
+    elif strategy == 'demand_proportional':
+        # 策略3: 与总需求成比例，但在一定范围内波动
+        # 理念：总容量应该足够但不过分充裕
+        base_capacity = total_demand / M  # 平均每条边分配的容量
+        capacity = np.random.uniform(
+            capacity_factor_min * base_capacity,
+            capacity_factor_max * base_capacity,
+            size=M
+        )
+    
+    else:
+        raise ValueError(f"未知的容量生成策略: {strategy}")
+    
+    return capacity
