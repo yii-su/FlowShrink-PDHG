@@ -4,7 +4,29 @@ import torch
 import time
 from torch_scatter import scatter, scatter_add
 import argparse
+import torch
+import FlowShrink.utils as utils
 
+def pdhg_solve(N,k,W,x0,X0,y0,z0,A,S,C,p,d,step_x,step_X,step_y,step_z):
+    #邻接矩阵，商品数量，权重矩阵，2个原始变量，2个对偶变量，ASC约束矩阵，p成本向量，d需求向量，step初始更新步长
+    n=N.shape[0]
+    m=N.shape[1]
+    x=x0
+    X=X0
+    y=y0
+    z=z0
+    MAX_ITER=1000
+    it=0
+    while it<MAX_ITER:
+        #primal更新x
+        x=x-step_x*((torch.mv(A.T,y))+torch.mv(C.T,z)+p)
+        #商品流量投影到非负
+        x=max(torch.zeros(k*m),x)
+        #primal更新X
+        X=(X+step_X*(torch.mv(S.T,y)+2*torch.mv(W,d)))
+        
+    
+    
 def create_data(N,k):
     node_list = np.array([np.random.rand(N),
                           np.random.rand(N)]).reshape((N,2))

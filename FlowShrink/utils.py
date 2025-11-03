@@ -1,5 +1,6 @@
 from collections import deque
 
+import torch
 import numpy as np
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse import csr_matrix
@@ -270,3 +271,22 @@ def generate_capacity_constraints(A, commodities,
         raise ValueError(f"未知的容量生成策略: {strategy}")
     
     return capacity
+
+def generate_weight(k, max_value=100.0):
+    """
+    创建k×k的随机对角矩阵 :商品权重矩阵
+    
+    参数:
+        k: 矩阵大小
+        max_value: 随机数的最大值，默认100.0
+    
+    返回:
+        k×k的对角矩阵
+    """
+    # 生成k个随机正数
+    diagonal_elements = torch.rand(k) * max_value
+    
+    # 创建对角矩阵
+    diagonal_matrix = torch.diag(diagonal_elements)
+    
+    return diagonal_matrix
