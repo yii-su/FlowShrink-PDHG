@@ -155,9 +155,9 @@ class MultiCommodityNetworkFlowPDHG:
         prox for f1(X) = (X - d)^T W (X - d)
         => prox_{tau f1}(v) = (I + 2*tau*W)^{-1} (v + 2*tau*W*d)
         """
-        I = torch.eye(len(d), device=self.device)
-        M = I + 2 * tau * W
-        rhs = v + 2 * tau * (W @ d)
+        I = torch.eye(len(self.d), device=self.device)
+        M = I + 2 * tau * self.W
+        rhs = v + 2 * tau * (self.W @ self.d)
         return torch.linalg.solve(M, rhs)
 
     def f2_prox(self, v, tau):
@@ -165,7 +165,7 @@ class MultiCommodityNetworkFlowPDHG:
         prox for f2(x) = p_tilde^T x + I_{x>=0}
         => prox_{tau f2}(v) = max(0, v - tau * p_tilde)
         """
-        return torch.clamp(v - tau * p_tilde, min=0.0)
+        return torch.clamp(v - tau * self.p_tilde, min=0.0)
     
     
     def solve(self, ε_rel=1e-6, ε_abs=1e-8, max_iter=10000, check_interval=100):
@@ -253,33 +253,3 @@ class MultiCommodityNetworkFlowPDHG:
         print(f"总迭代次数: {k+1}")
         
         return self.get_solution()
-
-def main():
-    # 创建测试问题
-    num_nodes, num_edges, num_commodities, edges, edge_capacities, edge_costs, commodities, weights = create_test_problem()
-    
-    # 初始化求解器
-    solver = MultiCommodityNetworkFlowPDHG(num_nodes, num_edges, num_commodities)
-    
-    # 设置问题参数
-    solver.set_network_topology(edges, edge_capacities, edge_costs)
-    solver.set_commodities(commodities, weights)
-    
-    # 求解
-    solution = solver.solve(ε_rel=1e-4, max_iter=5000)
-    
-    # 输出结果
-    print("\n=== 求解结果 ===")
-    print(f"净流量: {solution['net_flows']}")
-    print("流量矩阵 (商品×边):")
-    print(solution['flow_matrix'])
-    
-    # 验证约束满足情况
-    print("\n=== 约束验证 ===")
-    total_flow = np.sum(solution['flow_matrix'], axis=0)
-    print(f"各边总流量: {total_flow}")
-    print(f"边容量: {edge_capacities}")
-    print(f"容量约束违反: {np.maximum(0, total_flow - edge_capacities)}")
-
-if __name__ == "__main__":
-    main()
