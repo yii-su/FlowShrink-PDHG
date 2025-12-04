@@ -215,7 +215,8 @@ def bfs_reachable(adj_matrix, source):
 def generate_capacity_constraints(A, commodities, 
                                   capacity_factor_min=1.0, 
                                   capacity_factor_max=3.0,
-                                  strategy='uniform'):
+                                  strategy='uniform',
+                                  seed=None):
     """
     为MCNF问题生成边容量约束
     
@@ -228,12 +229,14 @@ def generate_capacity_constraints(A, commodities,
             - 'uniform': 基于平均需求的均匀分布
             - 'scaled_uniform': 基于最大需求的均匀分布
             - 'demand_proportional': 与总需求成比例
+        seed: 随机数种子
     
     返回:
         np.ndarray: 边容量向量，长度M
     """
     N, M = A.shape
     K = len(commodities)
+    rng=np.random.default_rng(seed)
     
     # 提取所有商品的需求量
     demands = np.array([d for _, _, d in commodities])
@@ -248,20 +251,20 @@ def generate_capacity_constraints(A, commodities,
         # 理念：每条边应能容纳"若干个"平均商品需求
         capacity_min = capacity_factor_min * avg_demand
         capacity_max = capacity_factor_max * avg_demand
-        capacity = np.random.uniform(capacity_min, capacity_max, size=M)
+        capacity = rng.uniform(capacity_min, capacity_max, size=M)
         
     elif strategy == 'scaled_uniform':
         # 策略2: 基于最大需求的均匀分布
         # 理念：确保即使最大的单个商品也能通过（但不是所有边都能轻松通过）
         capacity_min = capacity_factor_min * max_demand
         capacity_max = capacity_factor_max * max_demand
-        capacity = np.random.uniform(capacity_min, capacity_max, size=M)
+        capacity = rng.uniform(capacity_min, capacity_max, size=M)
         
     elif strategy == 'demand_proportional':
         # 策略3: 与总需求成比例，但在一定范围内波动
         # 理念：总容量应该足够但不过分充裕
         base_capacity = total_demand / M  # 平均每条边分配的容量
-        capacity = np.random.uniform(
+        capacity = rng.uniform(
             capacity_factor_min * base_capacity,
             capacity_factor_max * base_capacity,
             size=M
@@ -272,21 +275,28 @@ def generate_capacity_constraints(A, commodities,
     
     return capacity
 
-def generate_weight(k, max_value=100.0):
+def generate_weight(k,dimtype='matrix',seed=None):
     """
     创建k×k的随机对角矩阵 :商品权重矩阵
     
     参数:
-        k: 矩阵大小
-        max_value: 随机数的最大值，默认100.0
+        k(int): ,矩阵大小
+        dimtype(str):matrix或vector，决定返回的权重矩阵维度（2D或1D）
+        seed:随机种子
     
     返回:
-        k×k的对角矩阵
+        k×k的对角矩阵（dimtype='matrix'）
+        或 k维向量（dimtype='vector'）
     """
-    # 生成k个随机正数
-    diagonal_elements = torch.rand(k) * max_value
+    rng=np.random.default_rng(seed)
+    # 生成k个随机正数（0~1）
+    diagonal_elements = rng.random(k)
     
-    # 创建对角矩阵
-    diagonal_matrix = torch.diag(diagonal_elements)
+    if dimtype not in ['matrix','vector']:
+        raise RuntimeError(f"Parameter dimtype must be 'matrix' or 'vector', but got '{dimtype}'.")
     
-    return diagonal_matrix
+    if dimtype=='vector':
+        return diagonal_elements
+    else:
+        diagonal_matrix = np.diag(diagonal_elements)
+        return diagonal_matrix
