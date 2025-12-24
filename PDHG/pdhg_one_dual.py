@@ -3,148 +3,166 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import FlowShrink.utils as utils
 
 import torch
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True # 避免一些无关警告
 import numpy as np
 from scipy.sparse import coo_matrix
 import time
 
-class MCNFPDHG:
-    def __init__(self):
+class MCNFPDHG:#迭代更新规则有bug
+    def __init__(self,dtype=torch.float32):
         self.device = torch.device('cuda:0')
-
+        self.dtype = dtype
+    
     def create_data(self, num_nodes, k, num_commodities, device='cuda:0', seed=1):
         self.N = num_nodes
         self.K = num_commodities
         self.device = torch.device(device)
-        dtype = torch.float32
+        dtype=self.dtype
+        if dtype==torch.float64:
+            npdtype=np.float64
+        else:
+            npdtype=np.float32
 
         # adjacency and incidence
         W_adj = utils.create_base_network(self.N, k, seed)
         W_adj = utils.ensure_weak_connectivity(W_adj, seed)
-        A_inc_np, p_np = utils.adjacency_to_incidence(W_adj)   # (N, M)
+        A_inc_np, p_np = utils.adjacency_to_incidence(W_adj)# (N, M)
         commodities = utils.create_commodities(W_adj, self.K, 10.0, seed)
         del W_adj
         
         # capacities
         c_np = utils.generate_capacity_constraints(A_inc_np, commodities, 1.0, 5.0, seed=seed)
-        self.c = torch.from_numpy(c_np.astype(np.float32)).to(self.device)
-
-        # to sparse coo
-        A_inc_coo = coo_matrix(A_inc_np)
+        self.c = torch.from_numpy(c_np.astype(npdtype)).to(self.device)
+        A_inc=torch.from_numpy(A_inc_np)
         del A_inc_np
-
-        rows = torch.from_numpy(A_inc_coo.row.astype(np.int64))
-        cols = torch.from_numpy(A_inc_coo.col.astype(np.int64))
-        vals = torch.from_numpy(A_inc_coo.data.astype(np.float32))
-        indices = torch.stack([rows, cols], dim=0)
-        A_inc_sparse = torch.sparse_coo_tensor(indices, vals, (self.N, A_inc_coo.shape[1]), dtype=dtype)
-        self.A_inc = A_inc_sparse.coalesce().to(self.device)
-        del rows, cols, vals, indices, A_inc_coo
+        '''
+        torch.where(condition) 在处理二维张量时，返回的索引是按照 Row-Major（行优先） 顺序排列的，即先扫描第0行，再扫描第1行，以此类推。
+        然而，你的 c（容量）、p（费用）以及变量 x 都是按照 Edge Index（列索引 0 到 M-1） 排列的。
+        你的假设：edges_src[j] 对应第 j 条边（即 A_inc 的第 j 列）的源节点。
+        实际情况：edges_src 只是包含了所有源节点的列表，但按照节点ID排序（受行扫描顺序影响），完全打乱了与边索引 0...M-1 的对应关系。 
+        实际变成了沿着dim=1寻找 
+        后果：
+        PDHG 求解器实际上是在一个 乱连线的图 上进行优化。边的起点和终点被重新洗牌了，但边的容量和费用却保持原序。     
+        '''
+        # self.edges_src=torch.where(A_inc==-1)[0].to(device)# M
+        # self.edges_dst=torch.where(A_inc==1)[0].to(device)# M
+        
+        # argmin 找到每列最小值的索引（即 -1 所在的行索引）
+        self.edges_src = torch.argmin(A_inc, dim=0).to(device)
+        # argmax 找到每列最大值的索引（即 1 所在的行索引）
+        self.edges_dst = torch.argmax(A_inc, dim=0).to(device)
+        self.M=A_inc.shape[1]
+        del A_inc
 
         # edge cost
-        p = torch.from_numpy(p_np.astype(np.float32)).to(self.device)
+        p = torch.from_numpy(p_np.astype(npdtype)).to(self.device)
         del p_np
 
-        self.M = self.A_inc.shape[1]
-
         # W, d
-        w_scale=300.0
-        self.W = torch.from_numpy(utils.generate_weight(self.K,dimtype='vector', seed=seed)*w_scale).to(self.device).to(dtype)
+        W_scale=300.0
+        #self.W已经乘了W_scale
+        self.W = torch.from_numpy(utils.generate_weight(self.K,dimtype='vector', seed=seed)*W_scale).to(self.device).to(dtype)
         demands = [c[2] for c in commodities]
         self.d = torch.tensor(demands, dtype=dtype, device=self.device)
 
         # keep p (M) on device
         self.p = p
 
-        # f_mat (K,N) small-ish dense (-1,0,1)
+        # f_mat (N,K) small-ish dense (-1,0,1)
         f_list = []
         for kk in range(self.K):
-            f_np = np.zeros(self.N, dtype=np.float32)
+            f_np = np.zeros(self.N, dtype=npdtype)
             s_idx, t_idx = commodities[kk][0], commodities[kk][1]
             f_np[s_idx] = -1.0
             f_np[t_idx] = 1.0
             f_list.append(torch.from_numpy(f_np))
-        self.f_mat = torch.stack(f_list, dim=0).to(self.device)
+        self.f_mat = torch.stack(f_list, dim=1).to(self.device)
 
         return self.N, self.M
+    
+    def pdhg_step_fn(self,x_prev, X_prev, Y, x_bar,X_bar, sigma, tau,  
+                 K, M, overrelax_rho):
+        # dual update,explicit,prox is here
+        Y_new = Y + sigma * (self.A_matvec(x_bar) - self.S_matvec(X_bar))
+
+        #primal update
+        v=(x_prev-tau*self.AT_matvec(Y_new)).reshape(M,K)-tau*self.p.unsqueeze(1)
+        #x update as projection
+        x_new= self.proj(v,self.c)
+        #X update as proximal operator
+        X_new = self.f1_prox(X_prev + tau * self.ST_matvec(Y_new), tau)
+        
+        #overrelaxation
+        x_bar=(1+overrelax_rho)*x_new-overrelax_rho*x_prev
+        X_bar=(1+overrelax_rho)*X_new-overrelax_rho*X_prev
+    
+        return x_new, X_new, Y_new, x_bar, X_bar
+
 
     # -------------------------
     # 矩阵-向量接口（稀疏化）
     # -------------------------
     def A_matvec(self, x):
-        K, N, M = self.K, self.N, self.M
-        X = x.view(K, M)
-        X_T = X.t().contiguous()           # M x K
-        Y = torch.sparse.mm(self.A_inc, X_T)  # N x K
-        return Y.t().reshape(K * N)
+        flow = x.view(self.M, self.K)
+        # 初始化结果 (N, K)
+        div = torch.zeros((self.N, self.K), device=x.device, dtype=x.dtype)
+        div.index_add_(0, self.edges_dst, flow)
+        div.index_add_(0, self.edges_src, -flow)
+        
+        return div.reshape(self.N * self.K)
 
     def AT_matvec(self, y):
-        K, N, M = self.K, self.N, self.M
-        Y = y.view(K, N)
-        Y_T = Y.t().contiguous()           # N x K
-        A_t = self.A_inc.transpose(0,1).coalesce()  # M x N
-        X_T = torch.sparse.mm(A_t, Y_T)    # M x K
-        return X_T.t().reshape(K * M)
+        potentials = y.view(self.N, self.K)
+        # tension: (M, K)
+        tension = potentials[self.edges_dst] - potentials[self.edges_src]
+        
+        return tension.reshape(self.M * self.K)
 
     def S_matvec(self, X):
         K, N = self.K, self.N
-        X_col = X.view(K, 1)
-        blocks = self.f_mat * X_col   # K x N
-        return blocks.reshape(K * N)
+        #pytorch的广播机制用于标量*向量时：
+        #f_mat为N×K矩阵，此处操作应为对f_mat的每一列，用标量X_k去乘
+        #正确方法应为将X广播为1行K列，对应f_mat的K列，每一列一个标量与该列做乘法（列线性变换），即X_col = X.unsqueeze(0)
+        #或直接省略unsqueeze，运算符*会触发pytorch的自动标量乘广播
+        #此处X_col = X.unsqueeze(1)没有报错，是因为测试数据中N==K，掩盖了维度的不匹配
+        blocks = self.f_mat * X   # N x K
+        return blocks.reshape(N * K)
 
     def ST_matvec(self, Y):
         K, N = self.K, self.N
-        Y_mat = Y.view(K, N)
-        return torch.sum(self.f_mat * Y_mat, dim=1)
+        Y_mat = Y.view(N, K)
+        return torch.sum(self.f_mat * Y_mat, dim=0)
     
-    def power_iteration_K_norm(self,A, f_stack, K, M, device='cuda', iters=20):
+    def power_iteration_K_norm(self, iters=50):
         """
         Compute ||K||_2 where K = [A  -S].
-        A: (N, M) sparse or dense tensor
-        f_stack: (K, N) tensor, each row = f_k^T
-        K: number of commodities
-        M: number of edges
+        A here is mathcal(A), the linear operator in PDHG, not the adjacent or incidence matrix of the graph
         """
-        A_t = A.t()
-
-        # random initial vector v = (x, X)
-        x = torch.randn(K, M, device=device)
-        X = torch.randn(K, device=device)
-
-        # normalize
-        norm = torch.sqrt((x**2).sum() + (X**2).sum())
-        x = x / norm
-        X = X / norm
-
+        dtype=self.dtype
+        device = self.device
+        u = torch.randn(self.K*self.M, device=device, dtype=dtype)#MK
+        v=torch.randn(self.K, device=device, dtype=dtype)#K
+        uv=torch.cat([u,v],dim=0)
+        uv=uv/uv.norm()#MK+K
+        
         for _ in range(iters):
+            u,v=torch.split(uv,self.K*self.M)
+            # K [u; v] = 𝓐(u) - S(v),KN
+            Kuv = self.A_matvec(u) - self.S_matvec(v)
 
-            # --- Compute u = K v = A x - S X ---
-            # A x_k for all k
-            Ax = A @ x.transpose(0,1)          # (N, K)
-            Ax = Ax.transpose(0,1).contiguous()# (K, N)
+            # Kᵀ(K[u;v])
+            # Kᵀ y = [𝓐ᵀ y ; -Sᵀ y]
+            KT_K_u = self.AT_matvec(Kuv)#KM=KM*KN * KN
+            KT_K_v = -self.ST_matvec(Kuv)#K=K*KN * KN
 
-            # S X = X[k] * f_k
-            SX = X.unsqueeze(1) * f_stack      # (K, N)
+            uv_next = torch.cat([KT_K_u, KT_K_v], dim=0)
+            norm_next = uv_next.norm()
+            uv = uv_next / norm_next#(M+1)*K
 
-            u = Ax - SX                        # (K, N)
-
-            # --- Compute v_new = K^T u ---
-            # x-part: A^T u_k
-            Atu = A_t @ u.transpose(0,1)       # (M, K)
-            Atu = Atu.transpose(0,1).contiguous()
-
-            # X-part:
-            # -(f_k^T u_k)
-            SXu = -(u * f_stack).sum(dim=1)    # (K,)
-
-            x_new = Atu
-            X_new = SXu
-
-            # normalize
-            norm = torch.sqrt((x_new**2).sum() + (X_new**2).sum())
-            x = x_new / norm
-            X = X_new / norm
-
-        return norm  # this is ||K||_2
+        # sqrt of eigenvalue of KᵀK
+        K_norm = norm_next.sqrt()
+        return K_norm
 
 
     # -------------------------
@@ -155,13 +173,13 @@ class MCNFPDHG:
                 tau=None, sigma=None,
                 kappa_Y=1.0,
                 max_iter=100000, tol=1e-2, device=None,
-                verbose=True, overrelax_rho=1.9):
+                verbose=True, overrelax_rho=1.0, check_interval=500):
         dev = self.device if device is None else torch.device(device)
         K, M = self.K, self.M
-        dtype = torch.float32
+        dtype = self.dtype
 
         if x0 is None:
-            x = torch.zeros(K*M, device=dev, dtype=dtype)
+            x = torch.zeros(M*K, device=dev, dtype=dtype)
         else:
             x = x0.clone().to(dev)
         if X0 is None:
@@ -175,15 +193,13 @@ class MCNFPDHG:
         self.d = self.d.to(dev)
         self.W = self.W.to(dev)
         self.f_mat = self.f_mat.to(dev)
-        self.A_inc = self.A_inc.to(dev)
            
         # calculate the 2-norm of linear operator in our problem formulation to ensure convergence
-        K_norm = self.power_iteration_K_norm(self.A_inc, self.f_mat, K, M)
-        eta = 1.0 / K_norm
+        K_norm = self.power_iteration_K_norm()
+        eta = 0.9 / K_norm # safer estimation, K_norm is derived by iteration
         pweight = torch.tensor(1.0)
         tau = eta/pweight
         sigma = eta*pweight
-        wu_it = 100
 
         # residual-based dual init
         rY = self.A_matvec(x) - self.S_matvec(X)
@@ -192,48 +208,33 @@ class MCNFPDHG:
         X_prev = X.clone()
         x_bar = x.clone()
         X_bar = X.clone()
-        vars = [x,X,Y]
 
         if dev.type == 'cuda':
             torch.cuda.synchronize()
         t0 = time.time()
 
         for it in range(max_iter):
-            # dual update,explicit,prox is here
-            Y_new = Y + sigma * (self.A_matvec(x_bar) - self.S_matvec(X_bar))
-
-            #primal update
-            v=x_prev-tau*self.AT_matvec(Y_new)
-            #x update as projection
-            x_new = self.proj((v.reshape(K,M)-tau*self.p),self.c).squeeze()
-            #X update as proximal operator
-            X_new = self.f1_prox(X_prev + tau * self.ST_matvec(Y_new), tau)
+            x_new, X_new, Y_new, x_bar, X_bar = self.pdhg_step_fn(x_prev,X_prev,Y,x_bar,X_bar,sigma,tau,self.K,self.M,overrelax_rho)
             
-            #overrelaxation
-            x_bar=(1+overrelax_rho)*x_new-overrelax_rho*x_prev
-            X_bar=(1+overrelax_rho)*X_new-overrelax_rho*X_prev
-
-            # residuals
-            r_primal = torch.norm(self.A_matvec(x_bar) - self.S_matvec(X_bar))
-            r_dual = torch.norm(x_new - x_prev)/tau + torch.norm(X_new - X_prev)/tau
-
-            if (r_primal.item() < tol) and (r_dual.item() < tol):
-                if verbose:
-                    print(f'Converged at iter {it}, r_p={r_primal:.2e}, r_d={r_dual:.2e}')
-                break
-
             if (it == max_iter - 1):
                 print(f'Max iterations reached, r_p={r_primal:.2e}, r_d={r_dual:.2e}')
 
-            if verbose and (it % 500 == 0):
-                print(f'Iter {it:6d} | r_p={r_primal:.2e} | r_d={r_dual:.2e}')
-                #print(f'x:\n{x}')
-                #print(f'X:\n{X}')
-            
-            if it%wu_it == 0:
-                tau, sigma, pweight = self.weight_update(x_new,X_new,vars[0],vars[1],Y_new,vars[2],pweight,eta)
-            
-            vars = [x_new,X_new,Y_new]
+            if it % check_interval == 0:
+                # residuals
+                with torch.no_grad():
+                    r_primal = torch.norm(self.A_matvec(x_bar) - self.S_matvec(X_bar))
+                    r_dual = torch.norm(x_new - x_prev)/tau + torch.norm(X_new - X_prev)/tau
+                    tau, sigma, pweight = self.weight_update(r_primal,r_dual,pweight,eta,tau)
+                    rp_val=r_primal.item()
+                    rd_val=r_dual.item()
+
+                
+                if verbose:
+                    print(f'Iter {it:6d} | r_p={r_primal:.2e} | r_d={r_dual:.2e}')
+                    
+                if (rp_val < tol) and (rd_val < tol):
+                    print(f'Converged at iter {it}, r_p={r_primal:.2e}, r_d={r_dual:.2e}')
+                    break
             
             #shift iteration
             x_prev,X_prev=x_new,X_new
@@ -242,24 +243,21 @@ class MCNFPDHG:
         if dev.type == 'cuda':
             torch.cuda.synchronize()
         if verbose:
-            print('pdhg total time:', time.time()-t0)
+            print('PDHG total time:', time.time()-t0)
         return x_new, X_new, Y_new
 
-    def weight_update(self, x, X, x_prev, X_prev, Y, Y_prev,pweight, eta, eps_zero=1e-5):
-        # use 2 norms of primal/dual changes to adapt pweight
-        del_x = torch.norm(x - x_prev)
-        del_X = torch.norm(X - X_prev)
-        del_Y = torch.norm(Y - Y_prev)
-        # primal/dual change magnitude (combine x and X)
-        del_primal = torch.pow((del_x + del_X) / 2.0,0.5)
-        del_dual = torch.pow(del_Y,0.5)
-        # smooth parameter theta
-        theta=0.5
-        if (del_primal > eps_zero) and (del_dual > eps_zero):
-            pweight = torch.exp(theta * torch.log(del_dual / del_primal) + theta * torch.log(pweight))
-        tau = eta / pweight
-        sigma = eta * pweight
-        return tau, sigma, pweight
+    def weight_update(self, r_primal,r_dual,pweight, eta, tau):
+        scaling = torch.tensor(0.5, device=self.device) # theta
+        ratio = r_primal / (r_dual + 1e-12)
+        log_p=torch.log(pweight)
+        cond1=ratio>10.0
+        cond2=ratio<0.1
+        change = torch.where(cond1, scaling, torch.where(cond2, -scaling, torch.tensor(0.0, device=self.device)))
+        pweight_new=torch.exp(log_p + change)
+        pweight_new = torch.clamp(pweight_new, 1e-5, 1e5)
+        tau = eta / pweight_new
+        sigma = eta * pweight_new
+        return tau, sigma, pweight_new
     
     # -------------------------
     # prox functions
@@ -267,66 +265,53 @@ class MCNFPDHG:
     def f1_prox(self, X_tilde, tau):
         return (X_tilde+2.0*tau*self.W*self.d) / (1.0+2.0*tau*self.W)
     
-    def proj(self,U, c):
+    
+    def proj(self, U, c):
         """
-        U: (K,M) tensor, unconstrained flows
-        c: (M,) tensor, per-edge capacities
-        Return: X: (KM) projected tensor
+        U: (M, K) unconstrained flow M ROW K COL
+        c: (M,) flow capacity per edge
         """
-        device = U.device
-        K, M = self.K,self.M
-
-        # Step 0: initial clipping
+        c_expanded = c.unsqueeze(1) # (M, 1)
+        
+        # 1. Clip negative values
         U_clipped = torch.clamp(U, min=0)
-
-        # quick exit: columns with sum <= c do not need projection
-        col_sum = U_clipped.sum(dim=0)  # (M,)
-        no_proj_mask = col_sum <= c  # (M,)
-
-        # initialize result
-        X = U_clipped.clone()
-
-        # need projection only where sum > c
-        if no_proj_mask.all():
-            return X.reshape(K*M).squeeze()  # nothing to do
-
-        # extract columns needing projection
-        mask = ~no_proj_mask  # (M,)
-        U_proj = U[:, mask]   # (K, M_active)
-        c_proj = c[mask]      # (M_active,)
-
-        # K-by-M_active
-        # Step 1: sort each column descending
-        U_sorted, _ = torch.sort(U_proj, dim=0, descending=True)
-
-        # Step 2: cumulative sums
-        S = U_sorted.cumsum(dim=0)  # (K, M_active)
-
-        # Step 3: all possible tau candidates
-        j = torch.arange(1, K+1, device=device, dtype=U.dtype).view(K, 1)  # (K,1)
-        tau_candidates = (S - c_proj.unsqueeze(0)) / j  # (K, M_active)
-
-        # Step 4: find j* = largest j with U_sorted[j] > tau_candidates[j]
-        cond = U_sorted > tau_candidates  # (K, M_active)
-        # find last True along dim=0
-        j_star = cond.float().argmax(dim=0)  # WRONG if argmax returns 0 for all-False
-        # we want last True: so reverse and compute index
-        cond_rev = cond.flip(0)
-        idx_rev = cond_rev.float().argmax(dim=0)
-        j_star = K - 1 - idx_rev  # (M_active,)
-
-        # Step 5: gather tau for each column
-        tau = tau_candidates[j_star, torch.arange(tau_candidates.shape[1], device=device)]
-
-        # Step 6: final projection
-        X_proj = torch.clamp(U_proj - tau.unsqueeze(0), min=0)
-
-        # put back into result
-        X[:, mask] = X_proj
-        return X.reshape(K*M).squeeze()
+        
+        # 2. Check sum constraint along dim=1 (Commodities)
+        row_sum = U_clipped.sum(dim=1, keepdim=True) # (M, 1)
+        
+        # 3. Sort along dim=1
+        U_sorted, _ = torch.sort(U_clipped, dim=1, descending=True)
+        
+        # 4. Cumsum along dim=1
+        S_cum = U_sorted.cumsum(dim=1)
+        
+        # 5. Calculate Tau Candidates
+        # (M, K) - (M, 1) / (1, K) -> (M, K)
+        tau_candidates = (S_cum - c_expanded) / torch.arange(1,self.K+1,device= U.device,dtype=U.dtype).view(1,self.K)
+        
+        # 6. Find rho (active set size)
+        cond = U_sorted > tau_candidates
+        # Count true values along dim=1
+        rho = cond.type(torch.int8).sum(dim=1) - 1
+        rho = torch.clamp(rho, min=0) # (M,)
+        
+        # 7. Gather Tau
+        # rho shape (M,), need (M, 1) to gather from (M, K)
+        tau_selected = torch.gather(tau_candidates, 1, rho.unsqueeze(1)) # (M, 1)
+        
+        # 8. Projection
+        x_proj = torch.clamp(U_clipped - tau_selected, min=0)
+        
+        # 9. Final Select
+        # If sum <= c, keep original, else project
+        need_proj = row_sum > c_expanded
+        x_out = torch.where(need_proj, x_proj, U_clipped)
+        
+        return x_out.reshape(self.M*self.K)
 
     def make_initials(self, device=None):
+        dtype=self.dtype
         dev = torch.device(device if device is not None else self.device)
-        x0 = torch.zeros(self.K * self.M, device=dev, dtype=torch.float32)
-        X0 = torch.zeros(self.K, device=dev, dtype=torch.float32)
+        x0 = torch.zeros(self.M * self.K, device=dev, dtype=dtype)
+        X0 = torch.zeros(self.K, device=dev, dtype=dtype)
         return x0, X0
