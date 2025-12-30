@@ -1,6 +1,7 @@
 import os, sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import FlowShrink.utils as utils
+import FlowShrink.shortest_paths_gpu as ws
 
 import torch
 import torch._dynamo
@@ -9,15 +10,15 @@ import numpy as np
 from scipy.sparse import coo_matrix
 import time
 
-class MCNFPDHG:#迭代更新规则有bug
-    def __init__(self,dtype=torch.float32):
+class MCNFPDHG:
+    def __init__(self,dtype=torch.float64):
         self.device = torch.device('cuda:0')
         self.dtype = dtype
     
-    def create_data(self, num_nodes, k, num_commodities, device='cuda:0', seed=1):
+    def create_data(self, num_nodes, k, num_commodities, seed=1, warm_start=True):
         self.N = num_nodes
         self.K = num_commodities
-        self.device = torch.device(device)
+        device = self.device
         dtype=self.dtype
         if dtype==torch.float64:
             npdtype=np.float64
@@ -29,6 +30,10 @@ class MCNFPDHG:#迭代更新规则有bug
         W_adj = utils.ensure_weak_connectivity(W_adj, seed)
         A_inc_np, p_np = utils.adjacency_to_incidence(W_adj)# (N, M)
         commodities = utils.create_commodities(W_adj, self.K, 10.0, seed)
+        if warm_start:
+            self.W_adj=torch.tensor(W_adj,dtype=dtype,device=device)
+        else:
+            self.W_adj=None
         del W_adj
         
         # capacities
@@ -63,8 +68,14 @@ class MCNFPDHG:#迭代更新规则有bug
         W_scale=300.0
         #self.W已经乘了W_scale
         self.W = torch.from_numpy(utils.generate_weight(self.K,dimtype='vector', seed=seed)*W_scale).to(self.device).to(dtype)
+        commodity_src = [c[0] for c in commodities]
+        commodity_dst = [c[1] for c in commodities]
         demands = [c[2] for c in commodities]
         self.d = torch.tensor(demands, dtype=dtype, device=self.device)
+        # tensors used as indices must be long, int, byte or bool tensors
+        self.k_src=torch.tensor(commodity_src, dtype=torch.long, device=self.device)
+        self.k_dst=torch.tensor(commodity_dst, dtype=torch.long, device=self.device)
+        del commodity_src,commodity_dst,demands,W_scale
 
         # keep p (M) on device
         self.p = p
@@ -77,7 +88,7 @@ class MCNFPDHG:#迭代更新规则有bug
             f_np[s_idx] = -1.0
             f_np[t_idx] = 1.0
             f_list.append(torch.from_numpy(f_np))
-        self.f_mat = torch.stack(f_list, dim=1).to(self.device)
+        self.f_mat = torch.stack(f_list, dim=1).to(self.device)        
 
         return self.N, self.M
     
@@ -172,9 +183,9 @@ class MCNFPDHG:#迭代更新规则有bug
                 x0=None, X0=None,
                 tau=None, sigma=None,
                 kappa_Y=1.0,
-                max_iter=100000, tol=1e-2, device=None,
+                max_iter=100000, tol=1e-2,
                 verbose=True, overrelax_rho=1.0, check_interval=500):
-        dev = self.device if device is None else torch.device(device)
+        dev = self.device
         K, M = self.K, self.M
         dtype = self.dtype
 
@@ -309,9 +320,94 @@ class MCNFPDHG:#迭代更新规则有bug
         
         return x_out.reshape(self.M*self.K)
 
-    def make_initials(self, device=None):
+    def make_initials(self):
         dtype=self.dtype
-        dev = torch.device(device if device is not None else self.device)
-        x0 = torch.zeros(self.M * self.K, device=dev, dtype=dtype)
-        X0 = torch.zeros(self.K, device=dev, dtype=dtype)
+        dev = self.device
+        if self.W_adj is None:
+            x0 = torch.zeros(self.M * self.K, device=dev, dtype=dtype)
+            X0 = torch.zeros(self.K, device=dev, dtype=dtype)
+        else:
+            x0,X0=self.generate_initial_flow_gpu()
         return x0, X0
+    
+    def generate_initial_flow_gpu(self):
+        """
+        在 GPU 上根据前驱（Next-Hop）矩阵 P 重建路径并生成初始流 x0。
+            
+        返回:
+            x0: torch.Tensor, (M * K), 展平的初始流量向量
+            X0: torch.Tensor, (K,), 初始送达量向量, 与需求相同
+        """
+        device=self.device
+        dtype=self.dtype
+        # 1. 数据准备
+        K = self.K
+        # 各个commodities的原点和汇点
+        k_src = self.k_src
+        k_dst = self.k_dst
+        demands = self.d # (K,)
+        edges_src=self.edges_src
+        edges_dst=self.edges_dst
+        M=self.M
+        N=self.N
+        _,P,_=ws.apsp_gpu(self.W_adj,dtype=dtype)
+        del self.W_adj
+        self.W_adj=None
+
+        # 2. 构建 (u, v) -> edge_index 的快速查找表
+        # 这一步只需要做一次。如果是类成员函数，可以在 __init__ 或 create_data 中缓存 edge_lookup
+        edge_lookup = torch.full((N, N), -1, dtype=torch.long, device=device)
+        edge_lookup[edges_src, edges_dst] = torch.arange(M, device=device)
+
+        # 3. 初始化流量矩阵 (M, K)
+        x_flow = torch.zeros((M, K), dtype=dtype, device=device)
+        
+        # 4. 并行路径追踪 (Pointer Chasing)
+        # 所有商品并行从 s 出发走向 t
+        curr_nodes = k_src.clone()
+        
+        # 记录哪些商品已经到达终点，避免多余计算
+        active_mask = torch.ones(K, dtype=torch.bool, device=device)
+        
+        # 循环次数上限设为 N (最坏情况路径长度)
+        # 实际上对于稀疏图和小直径网络，这个循环会非常快
+        for _ in range(N):
+            # 如果所有商品都到达终点，提前退出
+            # 注意：这里需要排除掉那些 s==t 的琐碎情况（如果有的话）
+            arrived = (curr_nodes == k_dst)
+            active_mask = active_mask & (~arrived)
+            
+            if not active_mask.any():
+                break
+                
+            # --- 核心逻辑 ---
+            
+            # 1. 查找下一跳节点
+            # P shape [N, N]. gather indices: curr_nodes [K], t_indices [K]
+            # P[u, v] 代表从 u 去 v 的下一个节点
+            # 利用 Advanced Indexing: P[row_indices, col_indices]
+            next_nodes = P[curr_nodes, k_dst] # shape (K,)
+            
+            # 2. 查找对应的边索引
+            edge_ids = edge_lookup[curr_nodes, next_nodes] # shape (K,)
+            
+            # 3. 只有 active 且 边存在的商品才更新流量
+            # edge_ids == -1 说明图不连通或 P 矩阵指引了不存在的边
+            valid_step = active_mask & (edge_ids != -1)
+            
+            if not valid_step.any():
+                # 所有活跃的商品都找不到路了（图不连通），直接退出防止死循环
+                break
+                
+            # 4. 填入流量
+            # 选取有效的 k 索引
+            valid_k = torch.nonzero(valid_step, as_tuple=True)[0]
+            valid_e = edge_ids[valid_step]
+            
+            x_flow[valid_e, valid_k] = demands[valid_step]
+            
+            # 5. 更新位置
+            curr_nodes[valid_step] = next_nodes[valid_step]
+
+            # 5. 展平并返回 (M*K)和demand（松弛容量约束，则一定全部送达，X==d）
+        return x_flow.reshape(-1),self.d
