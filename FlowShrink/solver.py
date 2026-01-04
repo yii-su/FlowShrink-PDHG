@@ -3,7 +3,8 @@ import numpy as np
 from scipy import sparse
 import gurobipy as gp
 from gurobipy import GRB
-import os, sys
+import os
+import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from FlowShrink.decorators import cpu_timer
 
