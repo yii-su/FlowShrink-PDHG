@@ -15,7 +15,7 @@ class MCNFPDHG:
         self.device = torch.device('cuda:0')
         self.dtype = dtype
     
-    def create_data(self, num_nodes, k, num_commodities, seed=1, warm_start=True):
+    def create_data(self, num_nodes, k, num_commodities, seed=1, warm_start=False):
         self.N = num_nodes
         self.K = num_commodities
         device = self.device
@@ -241,7 +241,7 @@ class MCNFPDHG:
 
                 
                 if verbose:
-                    print(f'Iter {it:6d} | r_p={r_primal:.2e} | r_d={r_dual:.2e}')
+                    print(f'Iter {it:6d} | r_p={r_primal:.2e} | r_d={r_dual:.2e} | pweight={pweight}')
                     
                 if (rp_val < tol) and (rd_val < tol):
                     print(f'Converged at iter {it}, r_p={r_primal:.2e}, r_d={r_dual:.2e}')
