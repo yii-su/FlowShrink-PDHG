@@ -1,5 +1,6 @@
 import torch
 from pdhg_one_dual import MCNFPDHG
+from pdhg_one_dual_warm_start import MCNFPDHGWARMSTART
 import warnings
 warnings.filterwarnings("ignore", category=Warning)
 import os, sys
@@ -18,7 +19,7 @@ def calculate_objective(x,X,w,d,p):
     obj=w@torch.square(X-d)+p@torch.sum(x.reshape(M,K),axis=1)
     return obj
 
-N = 1000
+N = 500
 k = 20
 K = 500
 seed = 1
@@ -33,16 +34,16 @@ W=utils.generate_weight(K,'vector',seed)
 device='cuda:0'
 warm_start=True
 
-model = MCNFPDHG(torch.float64)
-_,M=model.create_data(N,k,K,seed=seed,warm_start=warm_start)
+model = MCNFPDHGWARMSTART(torch.float64)
+_,M=model.create_data(N,k,K,seed=seed)
 print(f'vertices:{N}, neighbors:{k}, arcs(edges):{M}, commodities:{K}, seed:{seed}, warm_start:{warm_start}')
-x0,X0 = model.make_initials()
-x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0)
+x0,X0,Y0 = model.make_initials()
+x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0,Y0)
 print(f"PDHG objective: {calculate_objective(x_pdhg,X_pdhg,model.W,model.d,model.p)}")
-print('-----')
-print(f"PDHG x:\n {x_pdhg}")
-print('-----')
-print(f"PDHG X:\n {X_pdhg}")
+# print('-----')
+# print(f"PDHG x:\n {x_pdhg}")
+# print('-----')
+# print(f"PDHG X:\n {X_pdhg}")
 # W_scale=torch.tensor(scale,device=device)
 # result_gurobi=solver.solve_mcnf_gurobi_cost(A,c,commodities,capacity,W=W,w_scale=scale)
 # print('求解器GUROBI结果')
