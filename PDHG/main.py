@@ -1,45 +1,62 @@
 import torch
+import os
+import sys
+import numpy as np
+
 from pdhg_one_dual import MCNFPDHG
 from pdhg_one_dual_warm_start import MCNFPDHGWARMSTART
 import warnings
-warnings.filterwarnings("ignore", category=Warning)
-import os, sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-import FlowShrink.solver as solver
+
+# import FlowShrink.solver as solver
 import FlowShrink.utils as utils
 import FlowShrink.decorators as decorators
-import numpy as np
-from torch.profiler import profile,ProfilerActivity,record_function
+from torch.profiler import profile, ProfilerActivity, record_function
+
+warnings.filterwarnings("ignore", category=Warning)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 原作者固定商品数量K==N，无法灵活设定商品数,决策变量数量（维度）为NM，且认为dest相同的流量都是同一种商品的，这可以argue：相同dest可以承接不同商品的流量
 # 现实问题：不同的商品可以运到相同的dest，也可以从相同的src出发运输
 # 这就像一家工厂生产不同产品，客户从这个src订购多种产品，发货到相同dest
 
-def calculate_objective(x,X,w,d,p):
-    obj=w@torch.square(X-d)+p@torch.sum(x.reshape(M,K),axis=1)
+N = 500
+k = 20
+K = 200
+seed = 1
+scale = 300.0
+
+device = "cuda:0"
+warm_start = True
+
+
+def calculate_objective(x, X, w, d, p):
+    obj = w @ torch.square(X - d) + p @ torch.sum(x.reshape(M, K), axis=1)
     return obj
 
-N = 1000
-k = 20
-K = 500
-seed = 1
-scale=300.0
 
-A_adj=utils.create_base_network(N,k,seed)
-A_adj=utils.ensure_weak_connectivity(A_adj,seed)
-A,c=utils.adjacency_to_incidence(A_adj)
-commodities=utils.create_commodities(A_adj,K,seed=seed)
-capacity=utils.generate_capacity_constraints(A, commodities, 1.0, 5.0,seed=seed)
-W=utils.generate_weight(K,'vector',seed)
-device='cuda:0'
-warm_start=True
+A_adj = utils.create_base_network(N, k, seed)
+A_adj = utils.ensure_weak_connectivity(A_adj, seed)
+A, c = utils.adjacency_to_incidence(A_adj)
+commodities = utils.create_commodities(A_adj, K, seed=seed)
+capacity = utils.generate_capacity_constraints(A, commodities, 1.0, 5.0, seed=seed)
+W = utils.generate_weight(K, "vector", seed)
 
 model = MCNFPDHGWARMSTART(torch.float64)
-_,M=model.create_data(N,k,K,seed=seed)
-print(f'vertices:{N}, neighbors:{k}, arcs(edges):{M}, commodities:{K}, seed:{seed}, warm_start:{warm_start}')
-x0,X0,Y0 = model.make_initials()
-x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0,Y0)
-#print(f"PDHG objective: {calculate_objective(x_pdhg,X_pdhg,model.W,model.d,model.p)}")
+_, M = model.create_data(N, k, K, seed=seed)
+
+print(
+    f"vertices:{N}, neighbors:{k}, arcs(edges):{M}, commodities:{K}, seed:{seed}, warm_start:{warm_start}"
+)
+x0, X0, Y0 = model.make_initials(warm_start=warm_start)
+# model.pdhg_step_fn = torch.compile(model.pdhg_step_fn, mode="max-autotune")
+model.pdhg_step_fn = torch.compile(model.pdhg_step_fn, dynamic=True)
+x_pdhg, X_pdhg, Y = model.pdhg_solve(x0, X0, Y0)
+# x_pdhg, X_pdhg, Y = model.pdhg_solve_cuda_graph(x0, X0, Y0)
+
+print(
+    f"PDHG objective: {calculate_objective(x_pdhg, X_pdhg, model.W, model.d, model.p)}"
+)
+
 # print('-----')
 # print(f"PDHG x:\n {x_pdhg}")
 # print('-----')
@@ -58,9 +75,9 @@ x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0,Y0)
 # print('-----')
 # print(f"GUROBI X:\n {X_gurobi}")
 # print(f'demand:\n{model.d}')
-    
-    
-#不考虑流量约束的松弛解，一种商品一定走单路径，不会有分叉
+
+
+# 不考虑流量约束的松弛解，一种商品一定走单路径，不会有分叉
 # capacity1 = generate_capacity_constraints(
 #     A, commodities,
 #     capacity_factor_min=1.0,
@@ -94,7 +111,7 @@ x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0,Y0)
 
 # # 执行 GPU APSP（装饰器会自动打印性能信息）
 # D, P, iterations = apsp_gpu(
-#     W_tensor, 
+#     W_tensor,
 #     device='cuda:0',
 #     convergence_check=True
 # )
@@ -108,7 +125,7 @@ x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0,Y0)
 
 # print("cpu")
 # D_sparse, P_sparse, iter_sparse = apsp_gpu_adaptive(
-#     W_tensor, 
+#     W_tensor,
 #     device='cpu',
 #     sparsity_threshold=0.3,
 #     convergence_check=True
@@ -116,7 +133,7 @@ x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0,Y0)
 
 # print("cuda")
 # D_sparse, P_sparse, iter_sparse = apsp_gpu_adaptive(
-#     W_tensor, 
+#     W_tensor,
 #     device='cuda:0',
 #     sparsity_threshold=0.3,
 #     convergence_check=True

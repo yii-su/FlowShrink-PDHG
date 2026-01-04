@@ -1,0 +1,18 @@
+[project]
+name = "flowshrink-pdhg"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "siat_ubuntu", email = "siat@ubuntu.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.8.10,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.ruff.lint]
+# 忽略指定的规则
+ignore = ["F401", "F841"]
