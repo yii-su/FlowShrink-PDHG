@@ -1,6 +1,5 @@
 import torch
 from pdhg_one_dual import MCNFPDHG
-from pdhg_one_dual_warm_start import MCNFPDHGWARMSTART
 import warnings
 warnings.filterwarnings("ignore", category=Warning)
 import os, sys
@@ -32,14 +31,14 @@ commodities=utils.create_commodities(A_adj,K,seed=seed)
 capacity=utils.generate_capacity_constraints(A, commodities, 1.0, 5.0,seed=seed)
 W=utils.generate_weight(K,'vector',seed)
 device='cuda:0'
-warm_start=True
+warm_start=False
 
-model = MCNFPDHGWARMSTART(torch.float64)
+model = MCNFPDHG(torch.float64)
 _,M=model.create_data(N,k,K,seed=seed)
 print(f'vertices:{N}, neighbors:{k}, arcs(edges):{M}, commodities:{K}, seed:{seed}, warm_start:{warm_start}')
-x0,X0,Y0 = model.make_initials()
-x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0,Y0)
-#print(f"PDHG objective: {calculate_objective(x_pdhg,X_pdhg,model.W,model.d,model.p)}")
+x0,X0 = model.make_initials()
+x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0)
+print(f"PDHG objective: {calculate_objective(x_pdhg,X_pdhg,model.W,model.d,model.p)}")
 # print('-----')
 # print(f"PDHG x:\n {x_pdhg}")
 # print('-----')
@@ -57,7 +56,7 @@ x_pdhg,X_pdhg,Y=model.pdhg_solve(x0,X0,Y0)
 # print(f"GUROBI x:\n {x_gurobi}")
 # print('-----')
 # print(f"GUROBI X:\n {X_gurobi}")
-# print(f'demand:\n{model.d}')
+#print(f'demand:\n{model.d}')
     
     
 #不考虑流量约束的松弛解，一种商品一定走单路径，不会有分叉
