@@ -11,7 +11,7 @@ import FlowShrink.utils as utils
 import FlowShrink.shortest_paths_gpu as ws
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-torch._dynamo.config.suppress_errors = True  # 避免一些无关警告
+torch._dynamo.config.suppress_errors = True  # type: ignore # 避免一些无关警告
 
 
 class MCNFPDHGWARMSTART:
@@ -314,49 +314,6 @@ class MCNFPDHGWARMSTART:
     def f1_prox(self, X_tilde, tau):
         return (X_tilde + 2.0 * tau * self.W * self.d) / (1.0 + 2.0 * tau * self.W)
 
-    # def proj(self, U, c):
-    #     """
-    #     U: (M, K) unconstrained flow M ROW K COL
-    #     c: (M,) flow capacity per edge
-    #     """
-    #     c_expanded = c.unsqueeze(1) # (M, 1)
-
-    #     # 1. Clip negative values
-    #     U_clipped = torch.clamp(U, min=0)
-
-    #     # 2. Check sum constraint along dim=1 (Commodities)
-    #     row_sum = U_clipped.sum(dim=1, keepdim=True) # (M, 1)
-
-    #     # 3. Sort along dim=1
-    #     U_sorted, _ = torch.sort(U_clipped, dim=1, descending=True)
-
-    #     # 4. Cumsum along dim=1
-    #     S_cum = U_sorted.cumsum(dim=1)
-
-    #     # 5. Calculate Tau Candidates
-    #     # (M, K) - (M, 1) / (1, K) -> (M, K)
-    #     tau_candidates = (S_cum - c_expanded) / torch.arange(1,self.K+1,device= U.device,dtype=U.dtype).view(1,self.K)
-
-    #     # 6. Find rho (active set size)
-    #     cond = U_sorted > tau_candidates
-    #     # Count true values along dim=1
-    #     rho = cond.type(torch.int8).sum(dim=1) - 1
-    #     rho = torch.clamp(rho, min=0) # (M,)
-
-    #     # 7. Gather Tau
-    #     # rho shape (M,), need (M, 1) to gather from (M, K)
-    #     tau_selected = torch.gather(tau_candidates, 1, rho.unsqueeze(1)) # (M, 1)
-
-    #     # 8. Projection
-    #     x_proj = torch.clamp(U_clipped - tau_selected, min=0)
-
-    #     # 9. Final Select
-    #     # If sum <= c, keep original, else project
-    #     need_proj = row_sum > c_expanded
-    #     x_out = torch.where(need_proj, x_proj, U_clipped)
-
-    #     return x_out.reshape(self.M*self.K)
-
     def proj(self, U, c):
         """
         Active Set 策略：只对违反容量约束的行进行 Sort 和精确投影。
@@ -635,13 +592,15 @@ class MCNFPDHGWARMSTART:
         for _ in range(N):
             arrived = curr_nodes == k_dst
             active_mask = active_mask & (~arrived)
-            if not active_mask.any(): break
+            if not active_mask.any():
+                break
 
             next_nodes = P[curr_nodes, k_dst]
             edge_ids = edge_lookup[curr_nodes, next_nodes]
             valid_step = active_mask & (edge_ids != -1)
             
-            if not valid_step.any(): break
+            if not valid_step.any():
+                break
 
             valid_k = torch.nonzero(valid_step, as_tuple=True)[0]
             valid_e = edge_ids[valid_step]
