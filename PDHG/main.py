@@ -7,7 +7,7 @@ from pdhg_one_dual import MCNFPDHG
 from pdhg_one_dual_warm_start import MCNFPDHGWARMSTART
 import warnings
 
-# import FlowShrink.solver as solver
+import FlowShrink.solver as solver
 import FlowShrink.utils as utils
 import FlowShrink.decorators as decorators
 from torch.profiler import profile, ProfilerActivity, record_function
@@ -19,14 +19,14 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 # 现实问题：不同的商品可以运到相同的dest，也可以从相同的src出发运输
 # 这就像一家工厂生产不同产品，客户从这个src订购多种产品，发货到相同dest
 
-N = 500
-k = 20
-K = 200
+N = 2000
+k = 10
+K = 2000
 seed = 1
 scale = 300.0
 
 device = "cuda:0"
-warm_start = True
+warm_start = False
 
 
 def calculate_objective(x, X, w, d, p):
@@ -34,12 +34,12 @@ def calculate_objective(x, X, w, d, p):
     return obj
 
 
-A_adj = utils.create_base_network(N, k, seed)
-A_adj = utils.ensure_weak_connectivity(A_adj, seed)
-A, c = utils.adjacency_to_incidence(A_adj)
-commodities = utils.create_commodities(A_adj, K, seed=seed)
-capacity = utils.generate_capacity_constraints(A, commodities, 1.0, 5.0, seed=seed)
-W = utils.generate_weight(K, "vector", seed)
+# A_adj = utils.create_base_network(N, k, seed)
+# A_adj = utils.ensure_weak_connectivity(A_adj, seed)
+# A, c = utils.adjacency_to_incidence(A_adj)
+# commodities = utils.create_commodities(A_adj, K, seed=seed)
+# capacity = utils.generate_capacity_constraints(A, commodities, 1.0, 5.0, seed=seed)
+# W = utils.generate_weight(K, "vector", seed)
 
 model = MCNFPDHGWARMSTART(torch.float64)
 _, M = model.create_data(N, k, K, seed=seed)
@@ -61,6 +61,7 @@ print(
 # print(f"PDHG x:\n {x_pdhg}")
 # print('-----')
 # print(f"PDHG X:\n {X_pdhg}")
+
 # W_scale=torch.tensor(scale,device=device)
 # result_gurobi=solver.solve_mcnf_gurobi_cost(A,c,commodities,capacity,W=W,w_scale=scale)
 # print('求解器GUROBI结果')
@@ -70,6 +71,7 @@ print(
 # x_gurobi=torch.tensor(result_gurobi['x'],device=device)
 # X_gurobi=torch.tensor(result_gurobi['X'],device=device)
 # print(f"GUROBI objective: {calculate_objective(x_gurobi,X_gurobi,model.W,model.d,model.p)}")
+
 # print('-----')
 # print(f"GUROBI x:\n {x_gurobi}")
 # print('-----')
