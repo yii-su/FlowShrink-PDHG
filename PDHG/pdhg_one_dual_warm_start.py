@@ -18,6 +18,9 @@ class MCNFPDHGWARMSTART:
     def __init__(self, dtype=torch.float64):
         self.device = torch.device("cuda:0")
         self.dtype = dtype
+        self.weight_update_scaling=torch.tensor(0.5,device=self.device)
+        self.best_rp=torch.tensor(torch.inf,device=self.device)
+        self.best_rd=torch.tensor(torch.inf,device=self.device)
 
     def create_data(self, num_nodes, k, num_commodities, seed=1):
         self.N = num_nodes
@@ -196,7 +199,7 @@ class MCNFPDHGWARMSTART:
         Y0,
         tau=None,
         sigma=None,
-        max_iter=100000,
+        max_iter=200000,
         tol=1e-2,
         verbose=True,
         overrelax_rho=1.0,
@@ -283,11 +286,17 @@ class MCNFPDHGWARMSTART:
         return x_new, X_new, Y_new
 
     def weight_update(self, r_primal, r_dual, pweight, eta, tau):
-        scaling = torch.tensor(0.5, device=self.device)  # theta
+        # cond_rp=r_primal>self.best_rp
+        # cond_rd=r_dual>self.best_rd
+        # cond_residual=cond_rp | cond_rd
+        # eta_new=torch.where(cond_residual,eta*0.9,eta)
+        # self.best_rp=torch.where(cond_rp,self.best_rp,r_primal)
+        # self.best_rd=torch.where(cond_rd,self.best_rd,r_dual)
+        scaling = self.weight_update_scaling  # theta
         ratio = r_primal / (r_dual + 1e-12)
         log_p = torch.log(pweight)
-        cond1 = ratio > 10.0
-        cond2 = ratio < 0.1
+        cond1 = ratio > 2.0
+        cond2 = ratio < 0.5
         change = torch.where(
             cond1,
             scaling,
@@ -297,7 +306,7 @@ class MCNFPDHGWARMSTART:
         pweight_new = torch.clamp(pweight_new, 1e-5, 1e5)
         tau = eta / pweight_new
         sigma = eta * pweight_new
-        return tau, sigma, pweight_new
+        return tau, sigma, pweight_new#,eta_new
 
     # -------------------------
     # prox functions
@@ -673,7 +682,7 @@ class MCNFPDHGWARMSTART:
         else:
             Y_matrix = torch.zeros_like(Y_matrix)
 
-        return x_final.reshape(-1), X_final, Y_matrix.reshape(-1)
+        return x_final.reshape(-1)*0.8, X_final*0.8, Y_matrix.reshape(-1)
 
     def _generate_cold_start(self):
         """
