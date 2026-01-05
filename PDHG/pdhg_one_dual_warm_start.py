@@ -21,6 +21,7 @@ class MCNFPDHGWARMSTART:
         self.weight_update_scaling=torch.tensor(0.5,device=self.device)
         self.best_rp=torch.tensor(torch.inf,device=self.device)
         self.best_rd=torch.tensor(torch.inf,device=self.device)
+        
 
     def create_data(self, num_nodes, k, num_commodities, seed=1):
         self.N = num_nodes
@@ -208,7 +209,7 @@ class MCNFPDHGWARMSTART:
         dev = self.device
         x = x0.to(dev)
         X = X0.to(dev)
-
+        
         # ensure data on device
         self.p = self.p.to(dev)
         self.c = self.c.to(dev)
@@ -284,6 +285,7 @@ class MCNFPDHGWARMSTART:
         if verbose:
             print("PDHG total time:", time.time() - t0)
         return x_new, X_new, Y_new
+
 
     def weight_update(self, r_primal, r_dual, pweight, eta, tau):
         # cond_rp=r_primal>self.best_rp
@@ -377,179 +379,6 @@ class MCNFPDHGWARMSTART:
 
         return U_out.reshape(self.M * self.K)
 
-    # def make_initials(self, warm_start=True):
-    #     x0, X0, Y0 = self.generate_initial_flow_gpu()
-    #     return x0, X0, Y0
-
-    # def generate_initial_flow_gpu(self):
-    #     """
-    #     warm start 核心策略：
-    #     1. Primal (x, X): Greedy Capacity Filling
-    #        - 按权重优先级，高权重商品优先占用边容量。
-    #        - 若某条边容量不足，计算截断比例，并应用到该商品整条路径。
-    #        - 保证初始解严格满足容量约束 (x <= Cap) 和流守恒 (X 匹配 x 的实际流出)。
-
-    #     2. Dual (Y): Cost-to-Go Potential
-    #        - Y 等于从当前节点到该商品汇点的最短路距离。
-    #        - 形成自然的势能梯度，减少 PDHG 建立流向的时间。
-    #     """
-    #     device = self.device
-    #     dtype = self.dtype
-
-    #     # --- 1. 数据准备 ---
-    #     K = self.K
-    #     M = self.M
-    #     N = self.N
-    #     k_src = self.k_src
-    #     k_dst = self.k_dst
-    #     demands = self.d  # (K,)
-    #     capacities = self.c  # (M,)
-
-    #     # 权重，用于贪心排序
-    #     weights = self.W
-
-    #     # --- 2. 并行 APSP 计算 (计算距离和前驱) ---
-    #     # D: (N, N), P: (N, N)
-    #     D, P, _ = ws.apsp_gpu(self.W_adj, dtype=dtype)
-    #     del self.W_adj
-    #     self.W_adj = None
-
-    #     # --- 3. 重建路径并生成 "满需求" 流量矩阵 ---
-    #     # 构建 (u, v) -> edge_index 的查找表
-    #     edge_lookup = torch.full((N, N), -1, dtype=torch.long, device=device)
-    #     edge_lookup[self.edges_src, self.edges_dst] = torch.arange(M, device=device)
-
-    #     # 初始化流量矩阵 (M, K),如果 M*K 显存过大，这里需要改用稀疏矩阵或分批处理
-    #     x_flow = torch.zeros((M, K), dtype=dtype, device=device)
-
-    #     curr_nodes = k_src.clone()
-    #     active_mask = torch.ones(K, dtype=torch.bool, device=device)
-
-    #     # 记录每个商品经过的边，用于后续计算瓶颈 (使用 one-hot 或 mask 标记)
-    #     # 为了显存效率，我们直接在 x_flow 上操作，因为 x_flow > 0 的地方就是路径
-
-    #     # 并行 Trace Path
-    #     for _ in range(N):
-    #         arrived = curr_nodes == k_dst
-    #         active_mask = active_mask & (~arrived)
-    #         if not active_mask.any():
-    #             break
-
-    #         next_nodes = P[curr_nodes, k_dst]
-    #         edge_ids = edge_lookup[curr_nodes, next_nodes]
-    #         valid_step = active_mask & (edge_ids != -1)
-
-    #         if not valid_step.any():
-    #             break
-
-    #         valid_k = torch.nonzero(valid_step, as_tuple=True)[0]
-    #         valid_e = edge_ids[valid_step]
-
-    #         # 暂时填入满需求流量
-    #         x_flow[valid_e, valid_k] = demands[valid_step]
-    #         curr_nodes[valid_step] = next_nodes[valid_step]
-
-    #     # --- 4. Greedy Capacity Filling (关键优化) ---
-
-    #     # 4.1 对商品按权重排序 (高权重在前)
-    #     sorted_indices = torch.argsort(weights, descending=True)
-    #     inv_sorted_indices = torch.argsort(sorted_indices)  # 用于还原顺序
-
-    #     # 重排流量矩阵和需求
-    #     x_sorted = x_flow[:, sorted_indices]  # (M, K)
-    #     d_sorted = demands[sorted_indices]  # (K,)
-
-    #     # 4.2 计算每条边的累积流量
-    #     # cum_flow[e, k] 表示：边 e 上，优先级 >= k 的所有商品的总流量需求
-    #     cum_flow = torch.cumsum(x_sorted, dim=1)  # (M, K)
-
-    #     # 4.3 计算可用性 (Vectorized Greedy Logic)
-    #     # prev_flow: 优先级比当前 k 高的商品占用的流量
-    #     prev_flow = cum_flow - x_sorted
-
-    #     # 剩余容量: Capacity - 高优先级占用
-    #     # clamp(min=0) 表示如果已经被高优先级占满了，剩余为0
-    #     caps_expanded = capacities.view(-1, 1)  # (M, 1)
-    #     residual_caps = (caps_expanded - prev_flow).clamp(min=0)  # (M, K)
-
-    #     # 边级允许流量: 不能超过需求，也不能超过剩余容量
-    #     allowed_flow_edge = torch.min(x_sorted, residual_caps)
-
-    #     # 4.4 计算路径瓶颈 (Path Bottleneck)
-    #     # 我们需要找到每个商品 k 在其路径所有边上的最小满足率 (satisfaction ratio)
-    #     # ratio = allowed / demand.
-    #     # 注意：只在 x_sorted > 0 (即路径上的边) 计算 ratio，其他位置设为 1.0 (无限制)
-
-    #     epsilon = 1e-6
-    #     # 避免除以0。如果 demand=0，ratio=1
-    #     ratios_edge = allowed_flow_edge / (x_sorted + epsilon)
-
-    #     # 非路径上的边 ratio 设为 1，以免干扰 min 操作
-    #     path_mask = x_sorted > epsilon
-    #     ratios_edge[~path_mask] = 1.0
-
-    #     # 沿维度 0 (边) 取最小值，得到每个商品的路径瓶颈比例
-    #     # shape: (K,)
-    #     path_bottleneck_ratios, _ = torch.min(ratios_edge, dim=0)
-
-    #     # 4.5 应用瓶颈比例，得到最终可行解
-    #     # 此时 X_final = d * ratio, x_final = x_path * ratio
-    #     # 这样保证了流守恒 (X 与 x 匹配) 和容量约束 (x <= Cap)
-
-    #     # 还原到原始商品顺序
-    #     final_ratios = path_bottleneck_ratios[inv_sorted_indices]
-
-    #     # 计算最终 x0 (利用广播机制)
-    #     # x_flow 原本存的是满需求，现在乘以比例
-    #     x_final = x_flow * final_ratios.view(1, -1)
-
-    #     # 计算最终 X0
-    #     X_final = demands * final_ratios
-
-    #     # --- 5. Dual Initialization (Cost-to-Go) ---
-    #     # Y_matrix[i, k] = Distance(i -> dst_k)
-    #     # D 矩阵目前是 D[src, dst]，我们需要取 D[:, k_dst] (所有点到 k_dst 的距离)
-    #     # 注意：apsp_gpu 返回的 D 通常是 D[i, j] 表示 i->j
-
-    #     Y_matrix = D[:, k_dst]  # Shape (N, K)
-
-    #     # 处理 Inf (不可达): 替换为一个较大的实数 (Max_Dist * 2)
-    #     finite_mask = torch.isfinite(Y_matrix)
-    #     if finite_mask.any():
-    #         max_val = Y_matrix[finite_mask].max()
-    #         fill_val = max_val * 2.0
-    #         Y_matrix = torch.where(finite_mask, Y_matrix, fill_val)
-    #     else:
-    #         Y_matrix = torch.zeros_like(Y_matrix)
-
-    #     # 展平返回
-    #     return x_final.reshape(-1), X_final, Y_matrix.reshape(-1)
-
-
-    # def make_initials(self, warm_start=True):
-    #     """
-    #     初始化 x, X, Y。
-    #     根据 warm_start 参数选择不同的生成策略。
-    #     """
-    #     device = self.device
-    #     dtype = self.dtype
-        
-    #     # 0. 基础全零初始化 (以防 W_adj 未准备好)
-    #     if self.W_adj is None and warm_start:
-    #         print("Warning: W_adj is None, falling back to zeros initialization.")
-    #         x0 = torch.zeros(self.M * self.K, device=device, dtype=dtype)
-    #         X0 = torch.zeros(self.K, device=device, dtype=dtype)
-    #         Y0 = torch.zeros(self.N * self.K, device=device, dtype=dtype) # 假设 Y 的维度是 N*K
-    #         return x0, X0, Y0
-
-    #     # 1. 根据模式分发
-    #     if warm_start:
-    #         # === 新逻辑: Warm Start (Greedy Capacity + Cost-to-Go) ===
-    #         return self._generate_warm_start()
-    #     else:
-    #         # === 旧逻辑: Cold Start (Simple Path + Zero/Residual Y) ===
-    #         return self._generate_cold_start()
-
     def make_initials(self, warm_start=True):
         # 0. 基础全零初始化 (以防 W_adj 未准备好)
         if self.W_adj is None and warm_start:
@@ -577,7 +406,8 @@ class MCNFPDHGWARMSTART:
         weights = self.W
 
         # --- APSP ---
-        D, P, _ = ws.apsp_gpu(self.W_adj, dtype=dtype)
+        # D, P, _ = ws.apsp_gpu(self.W_adj, dtype=dtype)
+        D, P, _ = ws.parallel_bellman_ford_gpu(self.W_adj, dtype=dtype) # 优化过的 apsp_gpu，之后都采用这个
         del self.W_adj
         self.W_adj = None
 
