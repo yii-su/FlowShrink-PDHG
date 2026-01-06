@@ -11,7 +11,7 @@ import FlowShrink.utils as utils
 import FlowShrink.shortest_paths_gpu as ws
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-torch._dynamo.config.suppress_errors = True  # 避免一些无关警告
+torch._dynamo.config.suppress_errors = True  # type: ignore # 避免一些无关警告
 
 
 class MCNFPDHGWARMSTART:
@@ -21,6 +21,7 @@ class MCNFPDHGWARMSTART:
         self.weight_update_scaling=torch.tensor(0.5,device=self.device)
         self.best_rp=torch.tensor(torch.inf,device=self.device)
         self.best_rd=torch.tensor(torch.inf,device=self.device)
+        
 
     def create_data(self, num_nodes, k, num_commodities, seed=1):
         self.N = num_nodes
@@ -208,7 +209,7 @@ class MCNFPDHGWARMSTART:
         dev = self.device
         x = x0.to(dev)
         X = X0.to(dev)
-
+        
         # ensure data on device
         self.p = self.p.to(dev)
         self.c = self.c.to(dev)
@@ -285,6 +286,7 @@ class MCNFPDHGWARMSTART:
             print("PDHG total time:", time.time() - t0)
         return x_new, X_new, Y_new
 
+
     def weight_update(self, r_primal, r_dual, pweight, eta, tau):
         # cond_rp=r_primal>self.best_rp
         # cond_rd=r_dual>self.best_rd
@@ -313,49 +315,6 @@ class MCNFPDHGWARMSTART:
     # -------------------------
     def f1_prox(self, X_tilde, tau):
         return (X_tilde + 2.0 * tau * self.W * self.d) / (1.0 + 2.0 * tau * self.W)
-
-    # def proj(self, U, c):
-    #     """
-    #     U: (M, K) unconstrained flow M ROW K COL
-    #     c: (M,) flow capacity per edge
-    #     """
-    #     c_expanded = c.unsqueeze(1) # (M, 1)
-
-    #     # 1. Clip negative values
-    #     U_clipped = torch.clamp(U, min=0)
-
-    #     # 2. Check sum constraint along dim=1 (Commodities)
-    #     row_sum = U_clipped.sum(dim=1, keepdim=True) # (M, 1)
-
-    #     # 3. Sort along dim=1
-    #     U_sorted, _ = torch.sort(U_clipped, dim=1, descending=True)
-
-    #     # 4. Cumsum along dim=1
-    #     S_cum = U_sorted.cumsum(dim=1)
-
-    #     # 5. Calculate Tau Candidates
-    #     # (M, K) - (M, 1) / (1, K) -> (M, K)
-    #     tau_candidates = (S_cum - c_expanded) / torch.arange(1,self.K+1,device= U.device,dtype=U.dtype).view(1,self.K)
-
-    #     # 6. Find rho (active set size)
-    #     cond = U_sorted > tau_candidates
-    #     # Count true values along dim=1
-    #     rho = cond.type(torch.int8).sum(dim=1) - 1
-    #     rho = torch.clamp(rho, min=0) # (M,)
-
-    #     # 7. Gather Tau
-    #     # rho shape (M,), need (M, 1) to gather from (M, K)
-    #     tau_selected = torch.gather(tau_candidates, 1, rho.unsqueeze(1)) # (M, 1)
-
-    #     # 8. Projection
-    #     x_proj = torch.clamp(U_clipped - tau_selected, min=0)
-
-    #     # 9. Final Select
-    #     # If sum <= c, keep original, else project
-    #     need_proj = row_sum > c_expanded
-    #     x_out = torch.where(need_proj, x_proj, U_clipped)
-
-    #     return x_out.reshape(self.M*self.K)
 
     def proj(self, U, c):
         """
@@ -420,179 +379,6 @@ class MCNFPDHGWARMSTART:
 
         return U_out.reshape(self.M * self.K)
 
-    # def make_initials(self, warm_start=True):
-    #     x0, X0, Y0 = self.generate_initial_flow_gpu()
-    #     return x0, X0, Y0
-
-    # def generate_initial_flow_gpu(self):
-    #     """
-    #     warm start 核心策略：
-    #     1. Primal (x, X): Greedy Capacity Filling
-    #        - 按权重优先级，高权重商品优先占用边容量。
-    #        - 若某条边容量不足，计算截断比例，并应用到该商品整条路径。
-    #        - 保证初始解严格满足容量约束 (x <= Cap) 和流守恒 (X 匹配 x 的实际流出)。
-
-    #     2. Dual (Y): Cost-to-Go Potential
-    #        - Y 等于从当前节点到该商品汇点的最短路距离。
-    #        - 形成自然的势能梯度，减少 PDHG 建立流向的时间。
-    #     """
-    #     device = self.device
-    #     dtype = self.dtype
-
-    #     # --- 1. 数据准备 ---
-    #     K = self.K
-    #     M = self.M
-    #     N = self.N
-    #     k_src = self.k_src
-    #     k_dst = self.k_dst
-    #     demands = self.d  # (K,)
-    #     capacities = self.c  # (M,)
-
-    #     # 权重，用于贪心排序
-    #     weights = self.W
-
-    #     # --- 2. 并行 APSP 计算 (计算距离和前驱) ---
-    #     # D: (N, N), P: (N, N)
-    #     D, P, _ = ws.apsp_gpu(self.W_adj, dtype=dtype)
-    #     del self.W_adj
-    #     self.W_adj = None
-
-    #     # --- 3. 重建路径并生成 "满需求" 流量矩阵 ---
-    #     # 构建 (u, v) -> edge_index 的查找表
-    #     edge_lookup = torch.full((N, N), -1, dtype=torch.long, device=device)
-    #     edge_lookup[self.edges_src, self.edges_dst] = torch.arange(M, device=device)
-
-    #     # 初始化流量矩阵 (M, K),如果 M*K 显存过大，这里需要改用稀疏矩阵或分批处理
-    #     x_flow = torch.zeros((M, K), dtype=dtype, device=device)
-
-    #     curr_nodes = k_src.clone()
-    #     active_mask = torch.ones(K, dtype=torch.bool, device=device)
-
-    #     # 记录每个商品经过的边，用于后续计算瓶颈 (使用 one-hot 或 mask 标记)
-    #     # 为了显存效率，我们直接在 x_flow 上操作，因为 x_flow > 0 的地方就是路径
-
-    #     # 并行 Trace Path
-    #     for _ in range(N):
-    #         arrived = curr_nodes == k_dst
-    #         active_mask = active_mask & (~arrived)
-    #         if not active_mask.any():
-    #             break
-
-    #         next_nodes = P[curr_nodes, k_dst]
-    #         edge_ids = edge_lookup[curr_nodes, next_nodes]
-    #         valid_step = active_mask & (edge_ids != -1)
-
-    #         if not valid_step.any():
-    #             break
-
-    #         valid_k = torch.nonzero(valid_step, as_tuple=True)[0]
-    #         valid_e = edge_ids[valid_step]
-
-    #         # 暂时填入满需求流量
-    #         x_flow[valid_e, valid_k] = demands[valid_step]
-    #         curr_nodes[valid_step] = next_nodes[valid_step]
-
-    #     # --- 4. Greedy Capacity Filling (关键优化) ---
-
-    #     # 4.1 对商品按权重排序 (高权重在前)
-    #     sorted_indices = torch.argsort(weights, descending=True)
-    #     inv_sorted_indices = torch.argsort(sorted_indices)  # 用于还原顺序
-
-    #     # 重排流量矩阵和需求
-    #     x_sorted = x_flow[:, sorted_indices]  # (M, K)
-    #     d_sorted = demands[sorted_indices]  # (K,)
-
-    #     # 4.2 计算每条边的累积流量
-    #     # cum_flow[e, k] 表示：边 e 上，优先级 >= k 的所有商品的总流量需求
-    #     cum_flow = torch.cumsum(x_sorted, dim=1)  # (M, K)
-
-    #     # 4.3 计算可用性 (Vectorized Greedy Logic)
-    #     # prev_flow: 优先级比当前 k 高的商品占用的流量
-    #     prev_flow = cum_flow - x_sorted
-
-    #     # 剩余容量: Capacity - 高优先级占用
-    #     # clamp(min=0) 表示如果已经被高优先级占满了，剩余为0
-    #     caps_expanded = capacities.view(-1, 1)  # (M, 1)
-    #     residual_caps = (caps_expanded - prev_flow).clamp(min=0)  # (M, K)
-
-    #     # 边级允许流量: 不能超过需求，也不能超过剩余容量
-    #     allowed_flow_edge = torch.min(x_sorted, residual_caps)
-
-    #     # 4.4 计算路径瓶颈 (Path Bottleneck)
-    #     # 我们需要找到每个商品 k 在其路径所有边上的最小满足率 (satisfaction ratio)
-    #     # ratio = allowed / demand.
-    #     # 注意：只在 x_sorted > 0 (即路径上的边) 计算 ratio，其他位置设为 1.0 (无限制)
-
-    #     epsilon = 1e-6
-    #     # 避免除以0。如果 demand=0，ratio=1
-    #     ratios_edge = allowed_flow_edge / (x_sorted + epsilon)
-
-    #     # 非路径上的边 ratio 设为 1，以免干扰 min 操作
-    #     path_mask = x_sorted > epsilon
-    #     ratios_edge[~path_mask] = 1.0
-
-    #     # 沿维度 0 (边) 取最小值，得到每个商品的路径瓶颈比例
-    #     # shape: (K,)
-    #     path_bottleneck_ratios, _ = torch.min(ratios_edge, dim=0)
-
-    #     # 4.5 应用瓶颈比例，得到最终可行解
-    #     # 此时 X_final = d * ratio, x_final = x_path * ratio
-    #     # 这样保证了流守恒 (X 与 x 匹配) 和容量约束 (x <= Cap)
-
-    #     # 还原到原始商品顺序
-    #     final_ratios = path_bottleneck_ratios[inv_sorted_indices]
-
-    #     # 计算最终 x0 (利用广播机制)
-    #     # x_flow 原本存的是满需求，现在乘以比例
-    #     x_final = x_flow * final_ratios.view(1, -1)
-
-    #     # 计算最终 X0
-    #     X_final = demands * final_ratios
-
-    #     # --- 5. Dual Initialization (Cost-to-Go) ---
-    #     # Y_matrix[i, k] = Distance(i -> dst_k)
-    #     # D 矩阵目前是 D[src, dst]，我们需要取 D[:, k_dst] (所有点到 k_dst 的距离)
-    #     # 注意：apsp_gpu 返回的 D 通常是 D[i, j] 表示 i->j
-
-    #     Y_matrix = D[:, k_dst]  # Shape (N, K)
-
-    #     # 处理 Inf (不可达): 替换为一个较大的实数 (Max_Dist * 2)
-    #     finite_mask = torch.isfinite(Y_matrix)
-    #     if finite_mask.any():
-    #         max_val = Y_matrix[finite_mask].max()
-    #         fill_val = max_val * 2.0
-    #         Y_matrix = torch.where(finite_mask, Y_matrix, fill_val)
-    #     else:
-    #         Y_matrix = torch.zeros_like(Y_matrix)
-
-    #     # 展平返回
-    #     return x_final.reshape(-1), X_final, Y_matrix.reshape(-1)
-
-
-    # def make_initials(self, warm_start=True):
-    #     """
-    #     初始化 x, X, Y。
-    #     根据 warm_start 参数选择不同的生成策略。
-    #     """
-    #     device = self.device
-    #     dtype = self.dtype
-        
-    #     # 0. 基础全零初始化 (以防 W_adj 未准备好)
-    #     if self.W_adj is None and warm_start:
-    #         print("Warning: W_adj is None, falling back to zeros initialization.")
-    #         x0 = torch.zeros(self.M * self.K, device=device, dtype=dtype)
-    #         X0 = torch.zeros(self.K, device=device, dtype=dtype)
-    #         Y0 = torch.zeros(self.N * self.K, device=device, dtype=dtype) # 假设 Y 的维度是 N*K
-    #         return x0, X0, Y0
-
-    #     # 1. 根据模式分发
-    #     if warm_start:
-    #         # === 新逻辑: Warm Start (Greedy Capacity + Cost-to-Go) ===
-    #         return self._generate_warm_start()
-    #     else:
-    #         # === 旧逻辑: Cold Start (Simple Path + Zero/Residual Y) ===
-    #         return self._generate_cold_start()
-
     def make_initials(self, warm_start=True):
         # 0. 基础全零初始化 (以防 W_adj 未准备好)
         if self.W_adj is None and warm_start:
@@ -601,10 +387,10 @@ class MCNFPDHGWARMSTART:
 
         # 1. 根据模式分发
         if warm_start:
-            return self._generate_warm_start()
+            # return self._generate_warm_start()
+            return self._generate_mwu_warm_start()
         else:
             return self._generate_cold_start()
-
 
     def _generate_warm_start(self):
         """
@@ -620,7 +406,8 @@ class MCNFPDHGWARMSTART:
         weights = self.W
 
         # --- APSP ---
-        D, P, _ = ws.apsp_gpu(self.W_adj, dtype=dtype)
+        # D, P, _ = ws.apsp_gpu(self.W_adj, dtype=dtype)
+        D, P, _ = ws.parallel_bellman_ford_gpu(self.W_adj, dtype=dtype) # 优化过的 apsp_gpu，之后都采用这个
         del self.W_adj
         self.W_adj = None
 
@@ -635,13 +422,15 @@ class MCNFPDHGWARMSTART:
         for _ in range(N):
             arrived = curr_nodes == k_dst
             active_mask = active_mask & (~arrived)
-            if not active_mask.any(): break
+            if not active_mask.any():
+                break
 
             next_nodes = P[curr_nodes, k_dst]
             edge_ids = edge_lookup[curr_nodes, next_nodes]
             valid_step = active_mask & (edge_ids != -1)
             
-            if not valid_step.any(): break
+            if not valid_step.any():
+                break
 
             valid_k = torch.nonzero(valid_step, as_tuple=True)[0]
             valid_e = edge_ids[valid_step]
@@ -711,3 +500,294 @@ class MCNFPDHGWARMSTART:
         Y0 = torch.zeros(self.N * self.K, device=device, dtype=dtype)
 
         return x0, X0, Y0
+
+
+    # def _generate_mwu_warm_start(self, batches=10):
+    #     device = self.device
+    #     dtype = self.dtype
+    #     K, M, N = self.K, self.M, self.N
+        
+    #     # 基础数据
+    #     k_src, k_dst = self.k_src, self.k_dst
+    #     demands, capacities = self.d, self.c
+    #     base_cost = self.p 
+        
+    #     x_total = torch.zeros((M, K), dtype=dtype, device=device)
+    #     current_edge_weights = base_cost.clone()
+    #     chunk_demands = demands / batches
+
+    #     # Edge lookup: (N, N) -> edge_index
+    #     edge_lookup = torch.full((N, N), -1, dtype=torch.long, device=device)
+    #     edge_lookup[self.edges_src, self.edges_dst] = torch.arange(M, device=device)
+
+    #     adj_matrix = torch.full((N, N), float('inf'), dtype=dtype, device=device)
+    #     adj_matrix.fill_diagonal_(0.0)
+
+    #     last_D = None
+
+    #     if self.W_adj is not None:
+    #         del self.W_adj
+    #         self.W_adj = None
+
+    #     for b in range(batches):
+    #         # A. 重建邻接矩阵
+    #         adj_matrix.fill_(float('inf'))
+    #         adj_matrix.fill_diagonal_(0.0)
+    #         adj_matrix[self.edges_src, self.edges_dst] = current_edge_weights
+
+    #         # B. 运行 APSP 
+    #         # 假设 ws.parallel_bellman_ford_gpu 返回 (Dist, Predecessors, _)
+    #         # P[i, j] 表示从 i 到 j 的路径上，j 的前驱节点
+    #         D, P, _ = ws.parallel_bellman_ford_gpu(adj_matrix, dtype=dtype)
+    #         last_D = D
+
+    #         # C. 路径追踪 (反向回溯: DST -> SRC)
+    #         x_batch = torch.zeros((M, K), dtype=dtype, device=device)
+            
+    #         # 当前追踪节点初始化为目的地
+    #         curr_nodes = k_dst.clone() 
+    #         active_mask = torch.ones(K, dtype=torch.bool, device=device)
+
+    #         # 最长路径不超过 N
+    #         for _ in range(N):
+    #             # 如果当前节点已经回溯到了源节点，则停止该 commodity
+    #             arrived = (curr_nodes == k_src)
+    #             active_mask = active_mask & (~arrived)
+                
+    #             if not active_mask.any():
+    #                 break
+                
+    #             # 查找前驱节点
+    #             # 我们需要路径 k_src -> ... -> prev -> curr -> ... -> k_dst
+    #             # P[src, dst] 给出的是 dst 的前驱
+    #             # 这里 src 是 k_src (每个 commodity 不同), dst 是当前回溯到的节点 curr_nodes
+    #             # 利用 PyTorch 的高级索引 P[rows, cols]
+    #             prev_nodes = P[k_src, curr_nodes]
+
+    #             # 检查连接性
+    #             # 边是 prev -> curr
+    #             edge_ids = edge_lookup[prev_nodes, curr_nodes]
+                
+    #             # 有效条件: 活跃且找到了有效边且前驱不是不可达(-1)
+    #             # 注意：假设 P 中不可达标记为 -1 或其他非法值，需根据 ws 库的行为调整
+    #             # 这里假设 edge_lookup 会处理非法节点返回 -1
+    #             valid_step = active_mask & (edge_ids != -1) & (prev_nodes != -1)
+                
+    #             if not valid_step.any():
+    #                 # 如果还有活跃的但找不到前驱，说明路断了
+    #                 break
+                
+    #             # 获取有效索引
+    #             # valid_k 是 commodity 的索引
+    #             valid_k = torch.nonzero(valid_step, as_tuple=True)[0]
+    #             valid_e = edge_ids[valid_step]
+                
+    #             # 累加本轮流量
+    #             # 注意 index_put_ accumulate=True 处理可能的重复边（虽然此时 valid_k 唯一，所以直接赋值也可以）
+    #             x_batch[valid_e, valid_k] += chunk_demands[valid_step]
+                
+    #             # 更新当前节点为前驱节点，继续回溯
+    #             curr_nodes[valid_step] = prev_nodes[valid_step]
+
+    #         # D. 累加到总流量
+    #         x_total += x_batch
+            
+    #         # 调试打印，确认 x_total 不为 0
+    #         if b == 0 and x_total.sum() == 0:
+    #             print("Warning: Batch 0 produced zero flow. Path reconstruction might be failing.")
+
+    #         # E. 拥塞感知更新
+    #         if b < batches - 1:
+    #             edge_flow_sum = x_total.sum(dim=1)
+    #             # 使用当前已路由的批次比例来归一化容量，或者直接用总容量（MWU通常用总容量）
+    #             # 这里 x_total 是累积流量，capacities 是总容量
+    #             # 随着 batch 增加，x_total 增大，congestion 增大，惩罚增大
+    #             congestion = edge_flow_sum / (capacities + 1e-6)
+                
+    #             # penalty_factor = 1.0 + 5.0 * torch.pow(congestion, 2)
+    #             overload = torch.relu(congestion - 1.0) # 只惩罚超过 1.0 的部分
+    #             penalty_factor = 1.0 + 2.0 * overload   # 线性惩罚
+    #             current_edge_weights = base_cost * penalty_factor
+    #             current_edge_weights = torch.max(current_edge_weights, base_cost)
+
+    #     x_final = x_total * 0.9
+    #     X_final = demands * 0.9
+
+    #     # Dual 初始化
+    #     # Y[u, k] ~ dist(u, k_dst)
+    #     # 同样注意 k_dst 是 vector
+    #     # D shape (N, N). D[:, k_dst] 选取目标列
+    #     # 但 k_dst 是 (K,)，我们需要对每个 commodity k 取出 D[:, k_dst[k]]
+    #     # 结果应为 (N, K)
+    #     Y_matrix = last_D[:, k_dst] # type: ignore
+        
+    #     finite_mask = torch.isfinite(Y_matrix)
+    #     if finite_mask.any():
+    #         max_val = Y_matrix[finite_mask].max()
+    #         Y_matrix = torch.where(finite_mask, Y_matrix, max_val * 2.0)
+    #     else:
+    #         Y_matrix = torch.zeros_like(Y_matrix)
+        
+    #     return x_final.reshape(-1), X_final, Y_matrix.reshape(-1)
+
+
+    def _generate_mwu_warm_start(self, batches=10):
+        device = self.device
+        dtype = self.dtype
+        K, M, N = self.K, self.M, self.N
+        
+        k_src, k_dst = self.k_src, self.k_dst
+        demands, capacities = self.d, self.c
+        base_cost = self.p 
+        
+        # [优化1] 预分配结果容器
+        x_total = torch.zeros((M, K), dtype=dtype, device=device)
+        
+        # [优化2] 缓存边的负载 (M,)，避免每轮对 (M, K) 做 sum(dim=1)
+        # 用 float32 累加防止溢出精度问题，最后再转回 dtype
+        current_edge_loads = torch.zeros(M, dtype=torch.float32, device=device) 
+        current_edge_weights = base_cost.clone()
+        
+        # 预计算每轮流量
+        chunk_demands = demands / batches
+
+        # Edge lookup: (N, N) -> edge_index
+        edge_lookup = torch.full((N, N), -1, dtype=torch.long, device=device)
+        edge_lookup[self.edges_src, self.edges_dst] = torch.arange(M, device=device)
+
+        # 预分配 Buffer，避免循环内重复 malloc
+        adj_matrix = torch.full((N, N), float('inf'), dtype=dtype, device=device)
+        # adj_matrix.fill_diagonal_(0.0) # 放到循环里一起做
+
+        last_D = None
+        if self.W_adj is not None:
+            del self.W_adj
+            self.W_adj = None
+
+        # 循环不变量：源节点列表不需要在循环里 clone
+        # 但我们需要追踪的 curr_nodes 会变，所以只在循环开始初始化
+        
+        # 预先生成 mask 容器
+        active_mask_buffer = torch.ones(K, dtype=torch.bool, device=device)
+
+        for b in range(batches):
+            # --- A. 重建邻接矩阵 ---
+            # 直接赋值，比 fill + fill_diagonal 略快，利用广播
+            adj_matrix.fill_(float('inf'))
+            adj_matrix.diagonal().fill_(0.0) 
+            adj_matrix[self.edges_src, self.edges_dst] = current_edge_weights
+
+            # --- B. 运行 APSP ---
+            # 假设返回 (Distance, Predecessors, _)
+            # P[src, dst] = predecessor of dst on path from src
+            D, P, _ = ws.parallel_bellman_ford_gpu(adj_matrix, dtype=dtype)
+            last_D = D
+
+            # --- C. 路径追踪 (反向回溯: DST -> SRC) ---
+            # 重置追踪状态
+            curr_nodes = k_dst.clone() 
+            active_mask_buffer.fill_(True)
+            active_mask = active_mask_buffer # 引用
+
+            # 提取当前批次的需求量 (避免循环内索引)
+            # chunks = chunk_demands # 也是 Tensor (K,)
+
+            for _ in range(N):
+                # 1. 检查是否抵达源点 (原地操作减少内存开销)
+                # arrived = (curr_nodes == k_src)
+                # active_mask &= (~arrived)
+                # 优化写法：仅对 active 的进行检查
+                
+                # 这里的逻辑是：如果是 active 且 node == src，则设为 inactive
+                # 使用 where 或者 直接索引更新
+                reached_src = (curr_nodes == k_src)
+                active_mask.masked_fill_(reached_src, False)
+
+                if not active_mask.any():
+                    break
+                
+                # 2. 查找前驱节点 P[k_src, curr_nodes]
+                # 只需计算 active 部分，减少索引开销
+                # 但为了利用 P 的连续内存，全量索引可能比 mask 后索引更快（取决于 K 大小）
+                # 这里保持全量索引，但在 edge_ids 处过滤
+                prev_nodes = P[k_src, curr_nodes]
+
+                # 3. 查找边 ID
+                edge_ids = edge_lookup[prev_nodes, curr_nodes]
+                
+                # 4. 确定有效步
+                # valid_step = active_mask & (edge_ids != -1) & (prev_nodes != -1)
+                # 这里 P 为 -1 意味着不可达 (假设ws库行为)
+                # 组合判断逻辑，减少中间变量
+                valid_step = active_mask & (edge_ids >= 0) & (prev_nodes >= 0)
+
+                if not valid_step.any():
+                    break
+                
+                # 5. [核心优化] 直接累加到 x_total 和 current_edge_loads
+                # 避免创建 temp_x_batch
+                
+                # 获取 indices
+                valid_k_indices = torch.nonzero(valid_step, as_tuple=True)[0]
+                valid_e_indices = edge_ids[valid_step]
+                flow_values = chunk_demands[valid_step]
+
+                # 更新总流矩阵 (使用 index_put_ accumulate=True)
+                # x_total[valid_e_indices, valid_k_indices] += flow_values
+                x_total.index_put_((valid_e_indices, valid_k_indices), flow_values, accumulate=True)
+
+                # [优化点] 同步更新边负载缓存，避免 step F 的 sum(dim=1)
+                # current_edge_loads[valid_e_indices] += flow_values
+                current_edge_loads.index_put_((valid_e_indices,), flow_values.float(), accumulate=True)
+
+                # 6. 移动节点
+                curr_nodes[valid_step] = prev_nodes[valid_step]
+
+            # --- D. 拥塞感知更新 (MWU) ---
+            if b < batches - 1:
+                # [优化] 直接使用缓存的 edge_loads，复杂度 O(M) 而非 O(M*K)
+                # congestion = current_edge_loads / (capacities + 1e-6)
+                
+                # 合并计算步骤减少 kernel launches
+                # penalty = 1.0 + 2.0 * relu(load/cap - 1.0)
+                # weight = base * penalty
+                
+                # 利用 JIT friendly 的写法 (虽然这里没开 JIT)
+                congestion_ratio = current_edge_loads / (capacities + 1e-6)
+                overload = torch.relu_(congestion_ratio - 1.0) # In-place relu
+                
+                # 向量化计算新权重
+                penalty_factor = overload # 复用内存
+                penalty_factor.mul_(2.0).add_(1.0) # 1 + 2 * overload
+                
+                # update weights
+                current_edge_weights = base_cost * penalty_factor
+                # 确保数值稳定性 (max 是必要的，虽然理论上 penalty >= 1)
+                current_edge_weights.max(base_cost) 
+
+        # --- E. 结果组装 ---
+        x_final = x_total.mul_(0.9) # In-place mul
+        X_final = demands * 0.9
+
+        # --- F. Dual 初始化 ---
+        # 确保 last_D 存在
+        if last_D is None: 
+            # Fallback for batches=0 case
+             D, _, _ = ws.parallel_bellman_ford_gpu(adj_matrix, dtype=dtype)
+             last_D = D
+             
+        # Y[u, k] ~ dist(u, k_dst)
+        # last_D: (N, N), k_dst: (K,)
+        # result: (N, K)
+        Y_matrix = last_D[:, k_dst] 
+        
+        # 处理 Inf
+        finite_mask = torch.isfinite(Y_matrix)
+        if finite_mask.any():
+            max_val = Y_matrix[finite_mask].max()
+            # 使用 where 填充
+            Y_matrix = torch.where(finite_mask, Y_matrix, max_val * 2.0)
+        else:
+            Y_matrix.zero_()
+        
+        return x_final.reshape(-1), X_final, Y_matrix.reshape(-1)
