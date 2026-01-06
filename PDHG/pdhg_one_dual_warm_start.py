@@ -387,10 +387,10 @@ class MCNFPDHGWARMSTART:
 
         # 1. 根据模式分发
         if warm_start:
-            return self._generate_warm_start()
+            # return self._generate_warm_start()
+            return self._generate_mwu_warm_start()
         else:
             return self._generate_cold_start()
-
 
     def _generate_warm_start(self):
         """
@@ -500,3 +500,146 @@ class MCNFPDHGWARMSTART:
         Y0 = torch.zeros(self.N * self.K, device=device, dtype=dtype)
 
         return x0, X0, Y0
+
+    # 无论如何修改 batches，pdhg的迭代轮次始终不变，应该是在之前的代码中存在问题（讨论解决）
+    def _generate_mwu_warm_start(self, batches=1):
+        """
+        基于 MWU (拥塞感知路由) 的 Warm Start 策略。
+        
+        原理:
+        将总需求分为 `batches` 份。每轮迭代路由一份流量，
+        然后根据当前链路的拥塞程度提高边权（惩罚）。
+        这样迫使后续流量寻找次优路径，形成负载均衡的初始流。
+        """
+        device = self.device
+        dtype = self.dtype
+        K, M, N = self.K, self.M, self.N
+        
+        # 基础数据
+        k_src, k_dst = self.k_src, self.k_dst
+        demands, capacities = self.d, self.c
+        base_cost = self.p # 基础边费用 (M,)
+        
+        # 1. 初始化累加器
+        # x_total: 累计边流量 (M, K)
+        x_total = torch.zeros((M, K), dtype=dtype, device=device)
+        # current_edge_weights: 当前边权重 (M,)，初始为基础费用
+        current_edge_weights = base_cost.clone()
+        
+        # 每轮待分配的需求量 (d / batches)
+        chunk_demands = demands / batches
+
+        # 预先构建 edge lookup (用于路径反查 edge_id)
+        # 这是一个常量表，只用构建一次
+        edge_lookup = torch.full((N, N), -1, dtype=torch.long, device=device)
+        edge_lookup[self.edges_src, self.edges_dst] = torch.arange(M, device=device)
+
+        # 用于 APSP 的邻接矩阵 buffer (N, N)
+        # 初始化为无穷大
+        adj_matrix = torch.full((N, N), float('inf'), dtype=dtype, device=device)
+        # 对角线置0 (虽然 APSP 可能处理，但显式处理更安全)
+        adj_matrix.fill_diagonal_(0.0)
+
+        # 记录最后一次的距离矩阵用于 Dual 初始化
+        last_D = None
+
+        # 释放原始 W_adj 节省显存 (我们将在循环中动态重建它)
+        if self.W_adj is not None:
+            del self.W_adj
+            self.W_adj = None
+
+        # --- MWU 迭代循环 ---
+        for b in range(batches):
+            # A. 重建邻接矩阵 (填入动态权重)
+            # 重置为 inf
+            adj_matrix.fill_(float('inf'))
+            adj_matrix.fill_diagonal_(0.0)
+            # 填入当前边权
+            adj_matrix[self.edges_src, self.edges_dst] = current_edge_weights
+
+            # B. 运行 APSP (并行 Bellman-Ford 或 Floyd)
+            # D: (N, N), P: (N, N)
+            D, P, _ = ws.parallel_bellman_ford_gpu(adj_matrix, dtype=dtype)
+            last_D = D
+
+            # C. 路径追踪 & 本轮流量分配
+            # (逻辑复用 generate_initial_flow_gpu，但针对 chunk_demands)
+            x_batch = torch.zeros((M, K), dtype=dtype, device=device)
+            curr_nodes = k_src.clone()
+            active_mask = torch.ones(K, dtype=torch.bool, device=device)
+
+            for _ in range(N): # 最长路径 N
+                arrived = (curr_nodes == k_dst)
+                active_mask = active_mask & (~arrived)
+                if not active_mask.any():
+                    break
+                
+                # 查下一跳
+                next_nodes = P[curr_nodes, k_dst]
+                edge_ids = edge_lookup[curr_nodes, next_nodes]
+                valid_step = active_mask & (edge_ids != -1)
+                
+                if not valid_step.any():
+                    break
+                
+                valid_k = torch.nonzero(valid_step, as_tuple=True)[0]
+                valid_e = edge_ids[valid_step]
+                
+                # 累加本轮流量
+                x_batch[valid_e, valid_k] = chunk_demands[valid_step]
+                curr_nodes[valid_step] = next_nodes[valid_step]
+
+            # D. 累加到总流量
+            x_total += x_batch
+
+            # E. 拥塞感知：更新边权重 (为下一轮做准备)
+            if b < batches - 1: # 最后一轮不需要更新
+                # 计算当前每条边的总流量
+                edge_flow_sum = x_total.sum(dim=1) # (M,)
+                
+                # 计算拥塞比率 (Flow / Capacity)
+                # 加一个小 epsilon 防止除零
+                congestion = edge_flow_sum / (capacities + 1e-6)
+                
+                # 核心 MWU 惩罚公式:
+                # 策略: 基础费用 * (1 + alpha * 拥塞度^2)
+                # 使用平方项是为了让接近容量边界的惩罚急剧增加
+                penalty_factor = 1.0 + 5.0 * torch.pow(congestion, 2)
+                
+                current_edge_weights = base_cost * penalty_factor
+                
+                # 必须保证权重不为负且不过小 (Bellman-Ford 稳定性)
+                current_edge_weights = torch.max(current_edge_weights, base_cost)
+
+
+        # --- 结果组装 ---
+        
+        # 1. 原始流 x
+        # 加上系数 0.9，稍微留一点余量，防止初始点直接位于可行域边界上导致梯度震荡
+        x_final = x_total * 0.9
+        
+        # 2. 已送达量 X
+        # MWU 假设全额发送，所以 X = demands * 0.9
+        X_final = demands * 0.9
+
+        # 3. 对偶变量 Y (Distance / Potential)
+        # 使用最后一次迭代的 D (此时包含拥塞惩罚，最能反映真实路况)
+        # Y[u, k] 应近似于 dist(u, k_dst)
+        # D shape (N, N), D[:, dst] 取出的是 "to dst" 的距离列向量
+        Y_matrix = last_D[:, k_dst]  # type: ignore
+        
+        # 处理无穷大 (不可达的情况)
+        finite_mask = torch.isfinite(Y_matrix)
+        if finite_mask.any():
+            max_val = Y_matrix[finite_mask].max()
+            # 将不可达点的势能设为最大值的两倍，给一个梯度指引
+            Y_matrix = torch.where(finite_mask, Y_matrix, max_val * 2.0)
+        else:
+            Y_matrix = torch.zeros_like(Y_matrix)
+        
+        # 将势能方向反转？ 
+        # PDHG定义 AT_matvec = pot[dst] - pot[src]
+        # 最短路性质: dist[dst] - dist[src] <= weight
+        # 通常 Y 取 dist 是合理的
+        
+        return x_final.reshape(-1), X_final, Y_matrix.reshape(-1)
