@@ -19,9 +19,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 # 现实问题：不同的商品可以运到相同的dest，也可以从相同的src出发运输
 # 这就像一家工厂生产不同产品，客户从这个src订购多种产品，发货到相同dest
 
-N = 500
+N = 1000
 k = 20
-K = 200
+K = 1000
 seed = 1
 scale = 300.0
 
