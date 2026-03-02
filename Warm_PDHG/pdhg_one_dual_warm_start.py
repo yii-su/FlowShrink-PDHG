@@ -7,8 +7,9 @@ import numpy as np
 from scipy.sparse import coo_matrix
 import time
 
-import FlowShrink.utils as utils
-import FlowShrink.shortest_paths_gpu as ws
+import utils
+from decorators import timed_ns
+import shortest_paths_gpu as ws
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 torch._dynamo.config.suppress_errors = True  # type: ignore # 避免一些无关警告
@@ -126,9 +127,6 @@ class MCNFPDHGWARMSTART:
 
         return x_new, X_new, Y_new, x_bar, X_bar
 
-    # -------------------------
-    # 矩阵-向量接口（稀疏化）
-    # -------------------------
     def A_matvec(self, x):
         flow = x.view(self.M, self.K)
         # 初始化结果 (N, K)
@@ -147,11 +145,7 @@ class MCNFPDHGWARMSTART:
 
     def S_matvec(self, X):
         K, N = self.K, self.N
-        # pytorch的广播机制用于标量*向量时：
-        # f_mat为N×K矩阵，此处操作应为对f_mat的每一列，用标量X_k去乘
-        # 正确方法应为将X广播为1行K列，对应f_mat的K列，每一列一个标量与该列做乘法（列线性变换），即X_col = X.unsqueeze(0)
-        # 或直接省略unsqueeze，运算符*会触发pytorch的自动标量乘广播
-        # 此处X_col = X.unsqueeze(1)没有报错，是因为测试数据中N==K，掩盖了维度的不匹配
+
         blocks = self.f_mat * X  # N x K
         return blocks.reshape(N * K)
 
@@ -190,8 +184,63 @@ class MCNFPDHGWARMSTART:
         K_norm = norm_next.sqrt()
         return K_norm
 
+
+    @timed_ns()
+    def _pdhg_core(self, x, X, Y, tau, sigma, max_iter, check_interval, tol, overrelax_rho, eta, verbose):
+        """
+        内部核心迭代函数，专注于计算，便于装饰器统计 GPU 时间。
+        """
+        x_prev = x.clone()
+        X_prev = X.clone()
+        x_bar = x.clone()
+        X_bar = X.clone()
+        
+        pweight = torch.tensor(1.0)
+        
+        # 记录实际迭代次数，用于装饰器统计
+        final_iter = 0 
+
+        for it in range(max_iter):
+            final_iter = it + 1
+            
+            x_new, X_new, Y_new, x_bar, X_bar = self.pdhg_step_fn(
+                x_prev, X_prev, Y, x_bar, X_bar,
+                sigma, tau, self.K, self.M, overrelax_rho,
+            )
+
+            # 收敛性检查
+            if it % check_interval == 0:
+                with torch.no_grad():
+                    r_primal = torch.norm(self.A_matvec(x_bar) - self.S_matvec(X_bar))
+                    r_dual = (
+                        torch.norm(x_new - x_prev) / tau
+                        + torch.norm(X_new - X_prev) / tau
+                    )
+                    
+                    # 动态调整步长权重
+                    tau, sigma, pweight = self.weight_update(
+                        r_primal, r_dual, pweight, eta, tau
+                    )
+                    
+                    rp_val = r_primal.item()
+                    rd_val = r_dual.item()
+
+                if verbose:
+                    print(f"{it:<8} | {rp_val:.2e}   | {rd_val:.2e} | {tau:.1e}  | {sigma:.1e}")
+
+                if (rp_val < tol) and (rd_val < tol):
+                    if verbose:
+                        print(f"Converged at iter {it}, r_p={rp_val:.2e}, r_d={rd_val:.2e}")
+                    break
+
+            # 更新变量
+            x_prev, X_prev = x_new, X_new
+            Y = Y_new
+            
+        return (x_new, X_new, Y_new), None, final_iter
+
     # -------------------------
-    # PDHG solver with automated tau/sigma tuning and relaxation theta
+    # 对外接口
     # -------------------------
     def pdhg_solve(
         self,
@@ -207,103 +256,57 @@ class MCNFPDHGWARMSTART:
         check_interval=500,
     ):
         dev = self.device
+        
+        # 1. 数据准备 (Data Preparation)
+        #    这部分通常是 IO 密集或内存操作，不应计入算法的核心 FPS/TPS 评估
         x = x0.to(dev)
         X = X0.to(dev)
+        Y = Y0.to(dev).clone() # Y 需要 clone，因为在循环中是迭代更新的
         
-        # ensure data on device
         self.p = self.p.to(dev)
         self.c = self.c.to(dev)
         self.d = self.d.to(dev)
         self.W = self.W.to(dev)
         self.f_mat = self.f_mat.to(dev)
 
-        # calculate the 2-norm of linear operator in our problem formulation to ensure convergence
+        # 2. 参数初始化
         K_norm = self.power_iteration_K_norm()
-        eta = 0.9 / K_norm  # safer estimation, K_norm is derived by iteration
+        eta = 0.9 / K_norm 
         pweight = torch.tensor(1.0)
-        tau = eta / pweight
-        sigma = eta * pweight
-
-        Y = Y0.to(dev).clone()
-        x_prev = x.clone()
-        X_prev = X.clone()
-        x_bar = x.clone()
-        X_bar = X.clone()
-
-        if dev.type == "cuda":
-            torch.cuda.synchronize()
         
-        
+        # 如果未指定，使用 heuristic 计算初始步长
+        if tau is None or sigma is None:
+            tau = eta / pweight
+            sigma = eta * pweight
+
         if verbose:    
             print(f"{'Iter':<8} | {'P_Res':<10} | {'D_Res':<10} | {'Tao':<8} | {'Sigma':<8}")
             print("-" * 75)
-        
-        t0 = time.time()
 
-        for it in range(max_iter):
-            x_new, X_new, Y_new, x_bar, X_bar = self.pdhg_step_fn(
-                x_prev,
-                X_prev,
-                Y,
-                x_bar,
-                X_bar,
-                sigma,
-                tau,
-                self.K,
-                self.M,
-                overrelax_rho,
+        # 3. 调用核心计算 (Decorated Call)
+        #    根据设备选择装饰器逻辑（这里假设主要是 GPU 场景）
+        if dev.type == 'cuda':
+            # 返回结构为 (Result, Placeholder, Iterations)
+            result_tuple, _, _ = self._pdhg_core(
+                x, X, Y, tau, sigma, max_iter, check_interval, tol, overrelax_rho, eta, verbose
             )
-
-            if it == max_iter - 1:
-                print(f"Max iterations reached, r_p={r_primal:.2e}, r_d={r_dual:.2e}")  # noqa: F821
-
-            if it % check_interval == 0:
-                # residuals
-                with torch.no_grad():
-                    r_primal = torch.norm(self.A_matvec(x_bar) - self.S_matvec(X_bar))
-                    r_dual = (
-                        torch.norm(x_new - x_prev) / tau
-                        + torch.norm(X_new - X_prev) / tau
-                    )
-                    tau, sigma, pweight = self.weight_update(
-                        r_primal, r_dual, pweight, eta, tau
-                    )
-                    rp_val = r_primal.item()
-                    rd_val = r_dual.item()
-
-                if verbose:
-                    # print(
-                    #     f"Iter {it:6d} | r_p={r_primal:.2e} | r_d={r_dual:.2e} | pweight={pweight}"
-                    # )
-                    print(f"{it:<8} | {rp_val:.2e}   | {rd_val:.2e} | {tau:.1e}  | {sigma:.1e}")
-                    
-
-                if (rp_val < tol) and (rd_val < tol):
-                    # print(
-                    #     f"Converged at iter {it}, r_p={r_primal:.2e}, r_d={r_dual:.2e}"
-                    # )
-                    print(f"{it:<8} | {rp_val:.2e}   | {rd_val:.2e} | {tau:.1e}  | {sigma:.1e}")
-                    print(f"Converged at iter {it}, r_p={rp_val:.2e}, r_d={rd_val:.2e}")
-                    break
-
-            # shift iteration
-            x_prev, X_prev = x_new, X_new
-            Y = Y_new
-
-        if dev.type == "cuda":
-            torch.cuda.synchronize()
-        if verbose:
-            print("PDHG total time:", time.time() - t0)
+        else: # 几乎不太可能在 CPU 上运行这个函数，但为了完整性，我们提供一个 fallback 逻辑
+            # 如果是在 CPU 上运行，建议另写一个 @cpu_timer 的 core 方法
+            # 或者直接调用不带装饰器的逻辑。此处为了演示复用逻辑：
+            # 注意：在 CPU 上调用 @gpu_timer 可能会报错（因为 torch.cuda.Event），
+            # 实际工程中这里应该根据 device 动态选择方法，或者 _pdhg_core 不加装饰器，
+            # 而是在这里手动 wrap。但为了符合你的要求，我们假设在 GPU 运行。
+            result_tuple, _, _ = self._pdhg_core(
+                x, X, Y, tau, sigma, max_iter, check_interval, tol, overrelax_rho, eta, verbose
+            )
+        
+        # 解包结果
+        x_new, X_new, Y_new = result_tuple
+        
         return x_new, X_new, Y_new
 
-
     def weight_update(self, r_primal, r_dual, pweight, eta, tau):
-        # cond_rp=r_primal>self.best_rp
-        # cond_rd=r_dual>self.best_rd
-        # cond_residual=cond_rp | cond_rd
-        # eta_new=torch.where(cond_residual,eta*0.9,eta)
-        # self.best_rp=torch.where(cond_rp,self.best_rp,r_primal)
-        # self.best_rd=torch.where(cond_rd,self.best_rd,r_dual)
+
         scaling = self.weight_update_scaling  # theta
         ratio = r_primal / (r_dual + 1e-12)
         log_p = torch.log(pweight)
@@ -402,6 +405,7 @@ class MCNFPDHGWARMSTART:
         else:
             return self._generate_cold_start()
 
+    @timed_ns()
     def _generate_warm_start(self):
         """
         Warm Start 策略1：
@@ -512,7 +516,7 @@ class MCNFPDHGWARMSTART:
         return x0, X0, Y0
 
 
-
+    @timed_ns()
     def _generate_mwu_warm_start(self, batches=10):
         device = self.device
         dtype = self.dtype

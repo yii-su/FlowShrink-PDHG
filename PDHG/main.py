@@ -19,9 +19,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 # 现实问题：不同的商品可以运到相同的dest，也可以从相同的src出发运输
 # 这就像一家工厂生产不同产品，客户从这个src订购多种产品，发货到相同dest
 
-N = 1000
+N = 100
 k = 20
-K = 1000
+K = 100
 seed = 1
 scale = 300.0
 
@@ -41,15 +41,21 @@ def calculate_objective(x, X, w, d, p):
 # capacity = utils.generate_capacity_constraints(A, commodities, 1.0, 5.0, seed=seed)
 # W = utils.generate_weight(K, "vector", seed)
 
-model = MCNFPDHGWARMSTART(torch.float64)
+model = MCNFPDHGWARMSTART(torch.float32)
 _, M = model.create_data(N, k, K, seed=seed)
 
 print(
     f"vertices:{N}, neighbors:{k}, arcs(edges):{M}, commodities:{K}, seed:{seed}, warm_start:{warm_start}"
 )
 x0, X0, Y0 = model.make_initials(warm_start=warm_start)
+
+# 先计算一次warm的目标值，看看初始点的质量
+print(
+    f"Initial objective: {calculate_objective(x0, X0, model.W, model.d, model.p)}"
+)
+
 # model.pdhg_step_fn = torch.compile(model.pdhg_step_fn, mode="max-autotune")
-model.pdhg_step_fn = torch.compile(model.pdhg_step_fn, dynamic=True)
+# model.pdhg_step_fn = torch.compile(model.pdhg_step_fn, dynamic=True)
 x_pdhg, X_pdhg, Y = model.pdhg_solve(x0, X0, Y0)
 # x_pdhg, X_pdhg, Y = model.pdhg_solve_cuda_graph(x0, X0, Y0)
 
